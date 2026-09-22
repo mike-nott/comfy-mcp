@@ -266,8 +266,10 @@ def build_server(settings: Settings) -> MCPServer:
     @friendly
     async def edit_image(
         ctx: Context,
-        instruction: str,
-        images: list[str],
+        instruction: str = "",
+        images: list[str] | None = None,
+        prompt: str = "",
+        reference_images: list[str] | None = None,
         model: str | None = None,
         negative: str = "",
         width: int | None = None,
@@ -281,6 +283,7 @@ def build_server(settings: Settings) -> MCPServer:
         """Edit one image, or compose a new image from 2-4 reference images.
 
         model: which image model to use; omit for the configured default. Currently available: "qwen21".
+        (`prompt` and `reference_images` are accepted as aliases for `instruction` and `images`.)
         images: 1-4 local file paths (or data:/base64 strings). ORDER MATTERS: the first image is
         the base/subject and sets the output canvas (unless width/height are given); it is fitted and
         padded, never stretched. Later images are supporting references at ~1 MP.
@@ -290,6 +293,8 @@ def build_server(settings: Settings) -> MCPServer:
         SECOND, with explicit <image1>/<image2> roles.
         Other parameters and the return value match generate_image.
         """
+        instruction = instruction or prompt
+        images = images or reference_images or []
         steps = steps or settings.default_steps
         cfg = settings.default_cfg if cfg is None else cfg
         _clamp_sampling(steps, cfg, count)

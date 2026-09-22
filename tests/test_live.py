@@ -82,7 +82,7 @@ async def test_edit_one_and_two_references(tmp_path):
     Image.new("RGB", (480, 480), (220, 180, 40)).save(ref2)
 
     single = await client.call_tool(
-        "edit_image", {"instruction": "Turn this plain blue image into a calm sea under a cloudy sky", "images": [str(ref1)], "seed": 7, "steps": 12}
+        "edit_image", {"prompt": "Turn this plain blue image into a calm sea under a cloudy sky", "reference_images": [str(ref1)], "seed": 7, "steps": 12}
     )
     text = _text(single)
     print("\n" + text)
