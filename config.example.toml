@@ -27,12 +27,25 @@ job_ttl = 1800
 # Image model used when a call does not pass `model`. Currently only "qwen21" is implemented.
 default_image_model = "qwen21"
 
+# Video model used when generate_video does not pass `model`, and the longest clip accepted (H3 max 15 s).
+default_video_model = "minimax_h3"
+max_video_seconds = 15
+
 # Qwen Image 2.1 files as ComfyUI lists them (see `comfy-mcp check` or the list_models tool).
 # Defaults are Comfy-Org's INT8 repackaged names; change them if you use another precision or renamed files.
 [qwen21]
 diffusion_model = "qwen_image_2.1_int8_convrot.safetensors"
 text_encoder = "qwen3vl_8b_int8_convrot.safetensors"
 vae = "qwen_image_2.1_vae_bf16.safetensors"
+
+# MiniMax H3 video files as ComfyUI lists them. Video also needs the ComfyUI-VideoHelperSuite node pack.
+[minimax_h3]
+diffusion_model = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+reference_model = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+text_encoder = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+video_vae = "minimax_h3_video_vae_fp16.safetensors"
+audio_vae = "minimax_h3_audio_vae_fp32.safetensors"
+turbo_lora = "minimax_h3_turbo_v4_step600_ema.safetensors"
 
 # Streamable HTTP mode (`comfy-mcp --http`). Token is required. Env override: COMFY_MCP_HTTP_TOKEN
 [http]

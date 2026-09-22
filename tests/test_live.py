@@ -11,6 +11,7 @@ import io
 import json
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import pytest
@@ -153,3 +154,98 @@ async def test_misconfigured_model_file_is_a_clear_error(tmp_path):
     text = _text(result)
     print("\n" + text)
     assert result.is_error and "does_not_exist.safetensors" in text and "[qwen21]" in text
+
+
+def _video_info(path: str) -> dict:
+    """Width/height/duration via ffprobe when available, else a minimal MP4 sanity check."""
+    import shutil
+    import subprocess
+
+    head = open(path, "rb").read(12)
+    assert head[4:8] == b"ftyp", "not an MP4"
+    if shutil.which("ffprobe"):
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration", "-of", "json", path],
+                capture_output=True, text=True, check=True, timeout=30,
+            ).stdout
+            data = json.loads(out)
+            return {"width": data["streams"][0]["width"], "height": data["streams"][0]["height"], "duration": float(data["format"]["duration"])}
+        except (subprocess.SubprocessError, ValueError, KeyError, IndexError) as error:
+            print("ffprobe unavailable:", error.__class__.__name__)
+    return {}
+
+
+async def test_video_t2v_draft(tmp_path):
+  async with mcp_session(tmp_path) as client:
+    models = json.loads(_text(await client.call_tool("list_models", {})))
+    assert models["video_models"]["minimax_h3"]["ready"], models["video_models"]
+    started = time.monotonic()
+    result = await client.call_tool(
+        "generate_video",
+        {"prompt": "A red fox trots across a snowy meadow at dawn, low sun, gentle camera pan following it, soft wind sound", "seconds": 5, "draft": True, "seed": 11},
+    )
+    text = _text(result)
+    print("\n" + text)
+    assert not result.is_error, text
+    pending = json.loads(text)
+    assert pending["media"] == "video" and pending["job_id"] and pending["seconds"] == 5.17
+    done = await client.call_tool("wait_for_job", {"job_id": pending["job_id"], "timeout": 1500})
+    text = _text(done)
+    print("\n" + text + f"\n[wall {time.monotonic() - started:.0f} s]")
+    assert not done.is_error, text
+    assert "MiniMax H3 · t2v · 1280×704 · 5.17 s · seed 11 · 8 steps (draft)" in text
+    saved = [line.split("saved: ", 1)[1] for line in text.splitlines() if line.startswith("saved:")]
+    assert len(saved) == 1 and saved[0].endswith(".mp4")
+    info = _video_info(saved[0])
+    print("ffprobe:", info)
+    if info:
+        assert (info["width"], info["height"]) == (1280, 704) and 5.0 <= info["duration"] <= 5.4
+    assert len(_images(done)) == 1  # poster frame
+    again = await client.call_tool("fetch_result", {"job_id": pending["job_id"]})
+    assert not again.is_error and saved[0] in _text(again)
+
+
+async def _run_video(client, args: dict, expect: str, timeout: int = 1800) -> tuple[str, list[str]]:
+    started = time.monotonic()
+    result = await client.call_tool("generate_video", args)
+    text = _text(result)
+    assert not result.is_error, text
+    pending = json.loads(text)
+    done = await client.call_tool("wait_for_job", {"job_id": pending["job_id"], "timeout": timeout})
+    text = _text(done)
+    print("\n" + text + f"\n[wall {time.monotonic() - started:.0f} s]")
+    assert not done.is_error, text
+    assert expect in text, text
+    saved = [line.split("saved: ", 1)[1] for line in text.splitlines() if line.startswith("saved:")]
+    assert len(saved) == 1 and saved[0].endswith(".mp4") and len(_images(done)) == 1
+    _video_info(saved[0])
+    return text, saved
+
+
+async def test_video_t2v_final(tmp_path):
+  async with mcp_session(tmp_path) as client:
+    await _run_video(client, {"prompt": "A red fox trots across a snowy meadow at dawn, low sun, gentle camera pan following it, soft wind sound", "seconds": 5, "seed": 11}, "t2v · 1280×704 · 5.17 s · seed 11 · 20 steps")
+
+
+async def test_video_i2v_from_image(tmp_path):
+  async with mcp_session(tmp_path) as client:
+    still = await client.call_tool("generate_image", {"prompt": "a small wooden sailboat on a calm lake at sunset, photo", "width": 1280, "height": 704, "seed": 5, "steps": 12})
+    path = [line.split("saved: ", 1)[1] for line in _text(still).splitlines() if line.startswith("saved:")][0]
+    await _run_video(client, {"prompt": "The sailboat drifts slowly to the right as ripples spread, camera holds still, water lapping sounds", "mode": "i2v", "images": [path], "seconds": 5, "draft": True, "seed": 12}, "i2v · 1280×704")
+
+
+async def test_video_r2v_and_refav(tmp_path):
+  async with mcp_session(tmp_path) as client:
+    still = await client.call_tool("generate_image", {"prompt": "portrait of a friendly robot with a round blue head, studio photo", "width": 704, "height": 704, "seed": 6, "steps": 12})
+    path = [line.split("saved: ", 1)[1] for line in _text(still).splitlines() if line.startswith("saved:")][0]
+    await _run_video(client, {"prompt": "The robot from the reference waves at the camera in a sunny park, birds chirping", "mode": "r2v", "images": [path], "seconds": 5, "seed": 13}, "r2v · 1280×704")
+    import math
+    import struct
+    import wave
+
+    clip = tmp_path / "tone.wav"
+    with wave.open(str(clip), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 16000))) for i in range(16000 * 3)))
+    await _run_video(client, {"prompt": "The robot from the reference hums along to the tone while nodding", "mode": "refav", "images": [path], "audio": str(clip), "seconds": 5, "seed": 14}, "refav · 1280×704")

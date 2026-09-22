@@ -23,7 +23,10 @@ class Job:
     position: int | None = None
     progress: tuple[int, int] | None = None
     message: str = "submitting"
-    results: list[bytes] | None = None
+    media: str = "image"  # image | video
+    results: list[bytes] | None = None  # PNGs (images) or None once a video's bytes were dropped
+    files: list[tuple[str, bytes]] | None = None  # (server filename, bytes) for video/audio outputs
+    poster: bytes | None = None  # first-frame PNG for video
     saved: list[str] | None = None  # paths written by an earlier delivery of this job
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -38,6 +41,7 @@ class Job:
         data: dict[str, Any] = {
             "job_id": self.id,
             "kind": self.kind,
+            "media": self.media,
             "state": self.state,
             "message": self.message,
             "elapsed_s": round(self.elapsed, 1),
@@ -52,7 +56,7 @@ class Job:
             data["images"] = len(self.results)
         if self.saved:
             data["saved"] = list(self.saved)
-        data.update({k: v for k, v in self.params.items() if k in ("seed", "width", "height", "count", "steps", "cfg", "model")})
+        data.update({k: v for k, v in self.params.items() if k in ("seed", "width", "height", "count", "steps", "cfg", "model", "mode", "seconds", "draft")})
         return data
 
 
@@ -61,19 +65,25 @@ class JobRegistry:
         self.ttl = ttl
         self._jobs: dict[str, Job] = {}
 
-    def create(self, kind: str, params: dict[str, Any], runner: Callable[[Job], Awaitable[list[bytes]]]) -> Job:
+    def create(self, kind: str, params: dict[str, Any], runner: Callable[[Job], Awaitable[Any]], media: str = "image") -> Job:
         self.sweep()
-        job = Job(id=secrets.token_hex(6), kind=kind, params=params)
+        job = Job(id=secrets.token_hex(6), kind=kind, params=params, media=media)
         job.task = asyncio.create_task(self._run(job, runner))
         self._jobs[job.id] = job
         return job
 
-    async def _run(self, job: Job, runner: Callable[[Job], Awaitable[list[bytes]]]) -> list[bytes]:
+    async def _run(self, job: Job, runner: Callable[[Job], Awaitable[Any]]) -> Any:
         try:
-            job.results = await runner(job)
+            outcome = await runner(job)
+            if isinstance(outcome, list):
+                job.results = outcome
+            else:  # RunResult-like: images + files
+                job.results = list(outcome.images) if job.media == "image" else None
+                job.files = list(outcome.files) or None
+                job.poster = outcome.images[0] if outcome.images else None
             job.state = "done"
             job.message = "finished"
-            return job.results
+            return outcome
         except asyncio.CancelledError:
             job.state = "cancelled"
             job.message = "cancelled"
@@ -120,7 +130,7 @@ class JobRegistry:
         now = time.monotonic()
         for job_id, job in list(self._jobs.items()):
             if job.finished is not None and now - job.finished > self.ttl:
-                job.results = None
+                job.results = job.files = job.poster = None
                 self._jobs.pop(job_id, None)
 
     def active(self) -> list[Job]:

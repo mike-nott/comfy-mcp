@@ -42,12 +42,25 @@ job_ttl = 1800
 # Image model used when a call does not pass `model`. Currently only "qwen21" is implemented.
 default_image_model = "qwen21"
 
+# Video model used when generate_video does not pass `model`, and the longest clip accepted (H3 max 15 s).
+default_video_model = "minimax_h3"
+max_video_seconds = 15
+
 # Qwen Image 2.1 files as ComfyUI lists them (see `comfy-mcp check` or the list_models tool).
 # Defaults are Comfy-Org's INT8 repackaged names; change them if you use another precision or renamed files.
 [qwen21]
 diffusion_model = "qwen_image_2.1_int8_convrot.safetensors"
 text_encoder = "qwen3vl_8b_int8_convrot.safetensors"
 vae = "qwen_image_2.1_vae_bf16.safetensors"
+
+# MiniMax H3 video files as ComfyUI lists them. Video also needs the ComfyUI-VideoHelperSuite node pack.
+[minimax_h3]
+diffusion_model = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+reference_model = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+text_encoder = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+video_vae = "minimax_h3_video_vae_fp16.safetensors"
+audio_vae = "minimax_h3_audio_vae_fp32.safetensors"
+turbo_lora = "minimax_h3_turbo_v4_step600_ema.safetensors"
 
 # Streamable HTTP mode (`comfy-mcp --http`). Token is required. Env override: COMFY_MCP_HTTP_TOKEN
 [http]
@@ -72,6 +85,16 @@ class Qwen21Files:
 
 
 @dataclass
+class MinimaxH3Files:
+    diffusion_model: str = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    reference_model: str = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+    text_encoder: str = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    video_vae: str = "minimax_h3_video_vae_fp16.safetensors"
+    audio_vae: str = "minimax_h3_audio_vae_fp32.safetensors"
+    turbo_lora: str = "minimax_h3_turbo_v4_step600_ema.safetensors"
+
+
+@dataclass
 class Settings:
     comfyui_url: str = "http://127.0.0.1:8188"
     output_dir: Path = Path("~/Pictures/ComfyUI")
@@ -82,7 +105,10 @@ class Settings:
     max_pixels: int = 2_097_152
     job_ttl: float = 1800.0
     default_image_model: str = "qwen21"
+    default_video_model: str = "minimax_h3"
+    max_video_seconds: float = 15.0
     qwen21: Qwen21Files = field(default_factory=Qwen21Files)
+    minimax_h3: MinimaxH3Files = field(default_factory=MinimaxH3Files)
     http: HttpSettings = field(default_factory=HttpSettings)
     debug: bool = False
     source: Path | None = None
@@ -116,6 +142,7 @@ def load(explicit: str | Path | None = None, *, debug: bool = False, env: dict[s
 
     http_data = data.get("http", {}) or {}
     qwen_data = data.get("qwen21", {}) or {}
+    h3_data = data.get("minimax_h3", {}) or {}
     settings = Settings(
         comfyui_url=str(data.get("comfyui_url", Settings.comfyui_url)),
         output_dir=Path(str(data.get("output_dir", Settings.output_dir))),
@@ -126,11 +153,14 @@ def load(explicit: str | Path | None = None, *, debug: bool = False, env: dict[s
         max_pixels=int(data.get("max_pixels", Settings.max_pixels)),
         job_ttl=float(data.get("job_ttl", Settings.job_ttl)),
         default_image_model=str(data.get("default_image_model", Settings.default_image_model)),
+        default_video_model=str(data.get("default_video_model", Settings.default_video_model)),
+        max_video_seconds=float(data.get("max_video_seconds", Settings.max_video_seconds)),
         qwen21=Qwen21Files(
             diffusion_model=str(qwen_data.get("diffusion_model", Qwen21Files.diffusion_model)),
             text_encoder=str(qwen_data.get("text_encoder", Qwen21Files.text_encoder)),
             vae=str(qwen_data.get("vae", Qwen21Files.vae)),
         ),
+        minimax_h3=MinimaxH3Files(**{k: str(h3_data.get(k, getattr(MinimaxH3Files, k))) for k in MinimaxH3Files.__dataclass_fields__}),
         http=HttpSettings(
             host=str(http_data.get("host", HttpSettings.host)),
             port=int(http_data.get("port", HttpSettings.port)),

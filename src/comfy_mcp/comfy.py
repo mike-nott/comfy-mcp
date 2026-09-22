@@ -27,6 +27,17 @@ FORMAT_PNG = 2
 
 ProgressFn = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 
+MAX_FILE_BYTES = 512 * 1024 * 1024
+HISTORY_OUTPUT_KEYS = ("gifs", "video", "videos", "audio", "images")
+
+
+@dataclass
+class RunResult:
+    """What a prompt produced: PNGs streamed over the websocket, and/or files fetched from history."""
+
+    images: list[bytes]
+    files: list[tuple[str, bytes]]  # (filename as ComfyUI named it, bytes)
+
 # A 1x1 opaque black PNG used to overwrite uploaded references once a job is done.
 BLANK_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108020000009077053d"
@@ -36,6 +47,17 @@ BLANK_PNG = bytes.fromhex(
 
 class ComfyError(RuntimeError):
     pass
+
+
+def temp_siblings(name: str) -> list[str]:
+    """Every temp file VideoHelperSuite leaves for one output: the reported file (e.g. `x_00001-audio.mp4`),
+    the video-only intermediate (`x_00001.mp4`) and the first-frame PNG (`x_00001.png`)."""
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        return [name]
+    base = stem[: -len("-audio")] if stem.endswith("-audio") else stem
+    names = [name, f"{base}.{ext}", f"{base}.png"]
+    return list(dict.fromkeys(names))
 
 
 @dataclass(frozen=True)
@@ -138,35 +160,67 @@ class ComfyClient:
                 return index + 1
         return None
 
-    async def upload_temp(self, png: bytes) -> str:
-        """Upload a PNG into ComfyUI's temp folder. Returns the LoadImage token."""
-        name = f"mcp-{secrets.token_hex(8)}.png"
+    async def upload_temp(self, data: bytes, suffix: str = ".png", mime: str = "image/png") -> str:
+        """Upload a file into ComfyUI's temp folder under a random name. Returns the `name [temp]` token
+        that LoadImage / LoadAudio accept."""
+        name = f"mcp-{secrets.token_hex(8)}{suffix}"
         result = await self._json(
             "POST",
             "/upload/image",
             data={"type": "temp", "subfolder": "", "overwrite": "true"},
-            files={"image": (name, png, "image/png")},
+            files={"image": (name, data, mime)},
         )
         if not isinstance(result, dict) or result.get("type") != "temp" or not result.get("name"):
-            raise ComfyError("ComfyUI did not accept the reference upload into its temp folder")
+            raise ComfyError("ComfyUI did not accept the upload into its temp folder")
         return f"{result['name']} [temp]"
 
-    async def scrub_temp(self, token: str) -> None:
-        """Overwrite an uploaded temp reference with a 1x1 blank PNG.
+    async def scrub_temp(self, token: str, subfolder: str = "") -> None:
+        """Overwrite a temp file (an uploaded reference or a fetched output) with a 1x1 blank PNG.
 
         ComfyUI has no delete endpoint; its temp folder is only cleared on restart.
-        Re-uploading under the same name with overwrite=true replaces the pixels.
+        Re-uploading under the same name with overwrite=true replaces the bytes.
+        Accepts a `name [temp]` token or a bare filename.
         """
         name = token.removesuffix(" [temp]")
         try:
             await self._json(
                 "POST",
                 "/upload/image",
-                data={"type": "temp", "subfolder": "", "overwrite": "true"},
+                data={"type": "temp", "subfolder": subfolder, "overwrite": "true"},
                 files={"image": (name, BLANK_PNG, "image/png")},
             )
         except ComfyError as error:
             self._log("temp scrub failed:", error)
+
+    async def fetch_view(self, filename: str, subfolder: str, kind: str) -> bytes:
+        """Download one file through /view (streamed, capped at MAX_FILE_BYTES)."""
+        data = bytearray()
+        try:
+            async with self._http.stream("GET", "/view", params={"filename": filename, "subfolder": subfolder, "type": kind}) as response:
+                if response.status_code != 200:
+                    raise ComfyError(f"ComfyUI /view returned {response.status_code} for {filename}")
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > MAX_FILE_BYTES:
+                        raise ComfyError(f"{filename} exceeds the {MAX_FILE_BYTES // 2**20} MB transfer limit")
+        except httpx.HTTPError as error:
+            raise ComfyError(f"download of {filename} failed: {error.__class__.__name__}") from error
+        return bytes(data)
+
+    async def history_outputs(self, prompt_id: str, node: str, attempts: int = 20) -> list[dict]:
+        """Descriptors ({filename, subfolder, type}) a node wrote, from /history. Polls briefly because
+        ComfyUI records history a moment after it reports execution finished."""
+        for attempt in range(attempts):
+            entry = await self._json("GET", f"/history/{prompt_id}")
+            outputs = (entry or {}).get(prompt_id, {}).get("outputs", {}) if isinstance(entry, dict) else {}
+            found = [d for key in HISTORY_OUTPUT_KEYS for d in outputs.get(node, {}).get(key, []) if isinstance(d, dict) and d.get("filename")]
+            if found:
+                return found
+            status = (entry or {}).get(prompt_id, {}).get("status", {}) if isinstance(entry, dict) else {}
+            if status.get("status_str") == "error":
+                raise ComfyError("ComfyUI recorded an execution error for this prompt")
+            await asyncio.sleep(0.25 * (attempt + 1))
+        raise ComfyError(f"ComfyUI history has no output for node {node}")
 
     async def delete_history(self, prompt_id: str) -> None:
         try:
@@ -194,8 +248,11 @@ class ComfyClient:
         expected: int,
         on_progress: ProgressFn | None = None,
         on_submitted: Callable[[str], Awaitable[None] | None] | None = None,
-    ) -> list[bytes]:
-        """Submit `graph` and return the PNG bytes emitted by `save_node`."""
+        history_node: str | None = None,
+    ) -> RunResult:
+        """Submit `graph`. Returns the PNGs `save_node` streamed over the websocket (exactly `expected`
+        of them, or none if `save_node` is None) and, when `history_node` is given, the files that node
+        wrote to ComfyUI's temp folder, fetched through /view and then blanked on the server."""
         client_id = uuid.uuid4().hex
         prompt_id: str | None = None
 
@@ -217,7 +274,17 @@ class ComfyClient:
                         await result
                 position = await self.queue_position(prompt_id)
                 await emit("queued", prompt_id=prompt_id, position=position)
-                return await self._collect(socket, prompt_id, save_node, expected, emit)
+                images = await self._collect(socket, prompt_id, save_node, expected, emit, wait_for_finish=history_node is not None)
+                files: list[tuple[str, bytes]] = []
+                if history_node:
+                    await emit("fetching", prompt_id=prompt_id)
+                    for descriptor in await self.history_outputs(prompt_id, history_node):
+                        name, sub, kind = descriptor["filename"], descriptor.get("subfolder", ""), descriptor.get("type", "temp")
+                        files.append((name, await self.fetch_view(name, sub, kind)))
+                        if kind == "temp":
+                            for sibling in temp_siblings(name):
+                                await self.scrub_temp(sibling, sub)
+                return RunResult(images=images, files=files)
         except websockets.exceptions.WebSocketException as error:
             raise ComfyError(f"Websocket to ComfyUI failed: {error}") from error
         except OSError as error:
@@ -226,7 +293,9 @@ class ComfyClient:
             if prompt_id:
                 await self.delete_history(prompt_id)
 
-    async def _collect(self, socket: Any, prompt_id: str, save_node: str, expected: int, emit: Callable[..., Awaitable[None]]) -> list[bytes]:
+    async def _collect(
+        self, socket: Any, prompt_id: str, save_node: str | None, expected: int, emit: Callable[..., Awaitable[None]], wait_for_finish: bool = False
+    ) -> list[bytes]:
         images: list[bytes] = []
         current_node: str | None = None
         started = time.monotonic()
@@ -243,10 +312,10 @@ class ComfyClient:
 
             if isinstance(message, bytes):
                 frame = Frame.parse(message)
-                if frame.is_png_output and current_node == save_node:
+                if frame.is_png_output and save_node is not None and current_node == save_node:
                     images.append(frame.payload)
                     await emit("image", index=len(images), of=expected)
-                    if len(images) >= expected:
+                    if len(images) >= expected and not wait_for_finish:
                         return images
                 continue
 

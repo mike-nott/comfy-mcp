@@ -48,3 +48,13 @@ def test_write_example_refuses_overwrite(tmp_path):
     else:
         raise AssertionError("expected FileExistsError")
     config.write_example(path, force=True)
+
+
+def test_video_section(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('max_video_seconds = 10\n[minimax_h3]\nturbo_lora = "my_turbo.safetensors"\n')
+    settings = config.load(path, env={})
+    assert settings.max_video_seconds == 10.0 and settings.default_video_model == "minimax_h3"
+    assert settings.minimax_h3.turbo_lora == "my_turbo.safetensors"
+    assert settings.minimax_h3.video_vae == "minimax_h3_video_vae_fp16.safetensors"
+    assert settings.model_files("minimax_h3") is settings.minimax_h3

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import functools
 import json
+import logging
 import secrets
 import time
 from typing import Any
@@ -18,16 +19,17 @@ from mcp.server.mcpserver.utilities.types import Image
 from . import __version__
 from .comfy import ComfyClient, ComfyError
 from .config import Settings
-from .images import dimensions, load_input, preview_jpeg, save_png
+from .images import dimensions, load_audio_input, load_input, preview_jpeg, save_bytes, save_png
 from .jobs import Job, JobRegistry
-from .recipes import IMAGE_MODELS, image_model
+from .recipes import IMAGE_MODELS, VIDEO_MODELS, image_model, video_model
 
 INSTRUCTIONS = (
     "Private media generation on a self-hosted ComfyUI; call list_models to see which models are available. "
     "generate_image makes new images from text; edit_image changes or combines existing images given as file paths or base64. "
-    "A call normally takes 20-60 seconds and blocks until the image is ready. If the server is busy the call may return a job_id "
-    "instead; poll it with wait_for_job or fetch_result. Results include a small preview and the path of the saved full-size PNG. "
-    "Nothing is stored on the ComfyUI server and this MCP keeps no logs."
+    "An image call normally takes 20-60 seconds and blocks until the image is ready. If the server is busy the call may return a job_id "
+    "instead; poll it with wait_for_job or fetch_result. Results include a small preview and the path of the saved full-size file. "
+    "generate_video (MiniMax H3, 5-15 s clips with sound) takes minutes and always returns a job_id immediately: call "
+    "wait_for_job(job_id, timeout=600) or check job_status. Nothing is stored on the ComfyUI server and this MCP keeps no logs."
 )
 
 MAX_SEED = 2**53 - 1
@@ -60,6 +62,10 @@ def _clamp_sampling(steps: int, cfg: float, count: int) -> None:
         raise ValueError("count must be between 1 and 4")
 
 
+def _ext(name: str) -> str:
+    return "." + name.rsplit(".", 1)[1].lower() if "." in name else ".bin"
+
+
 def _seed(seed: int | None) -> int:
     if seed is None:
         return secrets.randbelow(MAX_SEED)
@@ -78,6 +84,9 @@ def build_server(settings: Settings) -> MCPServer:
         instructions=INSTRUCTIONS,
         log_level="DEBUG" if settings.debug else "ERROR",
     )
+    # --debug must not turn into a frame-by-frame dump of the ComfyUI websocket (which carries prompt text).
+    for noisy in ("websockets", "websockets.client", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     # ---- readiness --------------------------------------------------------
 
@@ -91,36 +100,70 @@ def build_server(settings: Settings) -> MCPServer:
             client.loader_choices("LoraLoader", "lora_name"),
         )
 
-    def missing_files(key: str, unets: list[str], clips: list[str], vaes: list[str]) -> list[str]:
+    def missing_files(key: str, unets: list[str], clips: list[str], vaes: list[str], loras: list[str] | None = None) -> list[str]:
+        """Config keys whose file is not in the matching ComfyUI loader list. Field names map by convention:
+        *_model / diffusion_model -> UNET, *encoder* -> CLIP, *vae* -> VAE, *lora* -> LoRA."""
         files = settings.model_files(key)
-        return [
-            f"{key} = {value!r}"
-            for key, value, choices in (("diffusion_model", files.diffusion_model, unets), ("text_encoder", files.text_encoder, clips), ("vae", files.vae, vaes))
-            if value not in choices
-        ]
+        missing = []
+        for field, value in vars(files).items():
+            if "lora" in field:
+                choices = loras if loras is not None else [value]
+            elif "vae" in field:
+                choices = vaes
+            elif "encoder" in field:
+                choices = clips
+            else:
+                choices = unets
+            if value not in choices:
+                missing.append(f"{field} = {value!r}")
+        return missing
 
-    async def ensure_ready(key: str) -> None:
-        """Fail early with a readable message if the configured files are not on the server (cached 60 s)."""
+    async def missing_nodes(names: tuple[str, ...]) -> list[str]:
+        present = await asyncio.gather(*(client.object_info(name) for name in names))
+        return [name for name, info in zip(names, present) if not info]
+
+    async def ensure_ready(key: str, kind: str = "image") -> None:
+        """Fail early with a readable message if the configured files (or, for video, the required
+        nodes) are not on the server. Cached for 60 s per model."""
         if time.monotonic() < ready_until.get(key, 0.0):
             return
-        unets, clips, vaes, _ = await inventory()
-        missing = missing_files(key, unets, clips, vaes)
+        recipe = image_model(key) if kind == "image" else video_model(key)
+        unets, clips, vaes, loras = await inventory()
+        missing = missing_files(key, unets, clips, vaes, loras)
         if missing:
             raise ComfyError(
-                f"ComfyUI does not have the configured {image_model(key).NAME} file(s): "
+                f"ComfyUI does not have the configured {recipe.NAME} file(s): "
                 + "; ".join(missing)
                 + f". Call list_models to see what is installed and set the [{key}] keys in the comfy-mcp config file."
             )
+        if kind == "video":
+            absent = await missing_nodes(recipe.REQUIRED_NODES)
+            if absent:
+                hint = " Install the ComfyUI-VideoHelperSuite custom node pack." if "VHS_VideoCombine" in absent else ""
+                raise ComfyError(f"ComfyUI is missing node(s) needed for {recipe.NAME} video: {', '.join(absent)}.{hint}")
         ready_until[key] = time.monotonic() + 60.0
 
     def resolve_model(model: str | None):
         key = (model or settings.default_image_model).strip().lower()
         return key, image_model(key)
 
+    def resolve_video_model(model: str | None):
+        key = (model or settings.default_video_model).strip().lower()
+        return key, video_model(key)
+
     # ---- job plumbing -----------------------------------------------------
 
-    def start_job(kind: str, params: dict[str, Any], graph: dict, expected: int, save_node: str, temp_tokens: list[str] | None = None) -> Job:
-        async def runner(job: Job) -> list[bytes]:
+    def start_job(
+        kind: str,
+        params: dict[str, Any],
+        graph: dict,
+        expected: int,
+        save_node: str,
+        temp_tokens: list[str] | None = None,
+        media: str = "image",
+        history_node: str | None = None,
+    ) -> Job:
+        async def runner(job: Job):
             job.started = time.monotonic()
             try:
                 return await _run(job)
@@ -128,7 +171,7 @@ def build_server(settings: Settings) -> MCPServer:
                 for token in temp_tokens or []:
                     await client.scrub_temp(token)
 
-        async def _run(job: Job) -> list[bytes]:
+        async def _run(job: Job):
 
             async def on_submitted(prompt_id: str) -> None:
                 job.prompt_id = prompt_id
@@ -150,10 +193,14 @@ def build_server(settings: Settings) -> MCPServer:
                     job.message = f"step {job.progress[0]}/{job.progress[1]}"
                 elif stage == "image":
                     job.message = f"received image {data.get('index')}/{data.get('of')}"
+                elif stage == "fetching":
+                    job.message = "encoding finished, fetching the file"
 
-            return await client.run(graph, save_node=save_node, expected=expected, on_progress=on_progress, on_submitted=on_submitted)
+            return await client.run(
+                graph, save_node=save_node, expected=expected, on_progress=on_progress, on_submitted=on_submitted, history_node=history_node
+            )
 
-        return registry.create(kind, params, runner)
+        return registry.create(kind, params, runner, media=media)
 
     async def report(ctx: Context, job: Job) -> None:
         try:
@@ -187,6 +234,8 @@ def build_server(settings: Settings) -> MCPServer:
             raise ComfyError(job.error or "generation failed")
         if job.state == "cancelled":
             raise ComfyError("the job was cancelled")
+        if job.media == "video":
+            return finished_video(job, save)
         if not job.results:
             raise ComfyError("the job finished without images" if job.finished else f"the job is still {job.state}")
         params = job.params
@@ -207,6 +256,30 @@ def build_server(settings: Settings) -> MCPServer:
                 lines.append(f"image {index + 1} png_base64: {base64.b64encode(png).decode()}")
             content.append(Image(data=preview_jpeg(png, settings.preview_px), format="jpeg"))
         content.insert(0, "\n".join(lines))
+        return content
+
+    def finished_video(job: Job, save: bool) -> list[Any]:
+        if not job.files and not job.saved:
+            raise ComfyError("the job finished without a video" if job.finished else f"the job is still {job.state}")
+        params = job.params
+        run_time = (job.finished or time.monotonic()) - (job.started or job.created)
+        head = (
+            f"{params['model']} · {params['mode']} · {params['width']}×{params['height']} · {params['seconds']} s · seed {params['seed']}"
+            f" · {params['steps']} steps{' (draft)' if params.get('draft') else ''} · {run_time:.1f} s"
+        )
+        lines = [head]
+        if save:
+            if job.saved is None:
+                job.saved = [str(save_bytes(data, settings.output_dir, params["seed"], i, len(job.files), _ext(name))) for i, (name, data) in enumerate(job.files)]
+                job.files = None  # bytes are on disk now; keep the paths and the poster
+            lines += [f"saved: {path}" for path in job.saved]
+        elif job.files:
+            lines += [f"video {i + 1} {_ext(name).lstrip('.')}_base64: {base64.b64encode(data).decode()}" for i, (name, data) in enumerate(job.files)]
+        else:
+            lines += [f"saved earlier: {path}" for path in job.saved]
+        content: list[Any] = ["\n".join(lines)]
+        if job.poster:
+            content.append(Image(data=preview_jpeg(job.poster, settings.preview_px), format="jpeg"))
         return content
 
     def pending_content(job: Job) -> str:
@@ -324,6 +397,68 @@ def build_server(settings: Settings) -> MCPServer:
             return finished_content(job, save)
         return [pending_content(job)]
 
+    @mcp.tool(structured_output=False)
+    @friendly
+    async def generate_video(
+        ctx: Context,
+        prompt: str,
+        model: str | None = None,
+        mode: str = "t2v",
+        images: list[str] | None = None,
+        audio: str | None = None,
+        seconds: float = 5.0,
+        orientation: str = "landscape",
+        draft: bool = False,
+        seed: int | None = None,
+        save: bool = True,
+        wait: float = 0.0,
+    ) -> list[Any]:
+        """Generate a short video clip with sound (MiniMax H3). ASYNC: returns a job_id immediately;
+        then call wait_for_job(job_id, timeout=600) or job_status(job_id).
+
+        mode: "t2v" text only; "i2v" images=[first frame] or [first, last]; "r2v" images=1-3 references
+        of a subject/style (not a starting frame); "refav" references plus audio=<clip path> to follow.
+        seconds: 5-15, snapped to the model's frame grid (the effective length is returned).
+        orientation: "landscape" (1280×704) or "portrait" (704×1280).
+        draft=true: 8-step turbo preview (t2v/i2v only, much faster); reuse the seed for the final.
+        save=true writes the MP4 to the configured output folder; the result carries the path and a
+        first-frame preview. wait>0 blocks up to that many seconds before returning the job_id.
+        """
+        if not prompt.strip():
+            raise ValueError("prompt is required")
+        if not 1 <= seconds <= settings.max_video_seconds:
+            raise ValueError(f"seconds must be between 1 and {settings.max_video_seconds:g}")
+        key, recipe = resolve_video_model(model)
+        mode = mode.strip().lower()
+        await ensure_ready(key, "video")
+        temp_tokens: list[str] = []
+        references = []
+        for item in images or []:
+            png, w, h = await asyncio.to_thread(load_input, item)
+            token = await client.upload_temp(png)
+            temp_tokens.append(token)
+            references.append(recipe.Reference(token, w, h))
+        audio_token = None
+        if audio:
+            data, suffix = await asyncio.to_thread(load_audio_input, audio)
+            audio_token = await client.upload_temp(data, suffix, "application/octet-stream")
+            temp_tokens.append(audio_token)
+        chosen = _seed(seed)
+        graph, frame_count = recipe.graph(
+            settings.model_files(key), prompt=prompt, mode=mode, images=references, audio_token=audio_token,
+            seconds=seconds, orientation=orientation, draft=draft, seed=chosen,
+        )
+        width, height = recipe.canvas(orientation)
+        params = {
+            "model": recipe.NAME, "model_key": key, "mode": mode, "seed": chosen, "width": width, "height": height,
+            "seconds": recipe.seconds_for(frame_count), "frames": frame_count, "steps": recipe.DRAFT_STEPS if draft else recipe.FINAL_STEPS,
+            "draft": draft, "references": len(references), "audio": bool(audio_token),
+        }
+        job = start_job("video", params, graph, 1, recipe.POSTER_NODE, temp_tokens=temp_tokens, media="video", history_node=recipe.VIDEO_NODE)
+        if wait > 0 and await await_job(ctx, job, wait):
+            return finished_content(job, save)
+        return [pending_content(job)]
+
     @mcp.tool()
     @friendly
     async def server_status() -> dict[str, Any]:
@@ -342,8 +477,8 @@ def build_server(settings: Settings) -> MCPServer:
     @mcp.tool()
     @friendly
     async def list_models() -> dict[str, Any]:
-        """List the image models this server can drive (keys for the `model` parameter) with their readiness,
-        plus everything ComfyUI currently has installed."""
+        """List the image and video models this server can drive (keys for the `model` parameter) with their
+        readiness, plus everything ComfyUI currently has installed."""
         unets, clips, vaes, loras = await inventory()
         image_models = {}
         for key, recipe in IMAGE_MODELS.items():
@@ -358,22 +493,42 @@ def build_server(settings: Settings) -> MCPServer:
                 "missing": missing,
                 "hint": None if not missing else f"Set the [{key}] keys in the comfy-mcp config file to filenames from the installed lists.",
             }
+        video_models = {}
+        for key, recipe in VIDEO_MODELS.items():
+            files = settings.model_files(key)
+            missing = missing_files(key, unets, clips, vaes, loras)
+            absent = await missing_nodes(recipe.REQUIRED_NODES)
+            video_models[key] = {
+                "name": recipe.NAME,
+                "default": key == settings.default_video_model,
+                "supports": ["generate_video"],
+                "modes": list(recipe.MODES),
+                "configured_files": dict(vars(files)),
+                "ready": not missing and not absent,
+                "missing": missing,
+                "missing_nodes": absent,
+                "hint": None
+                if not missing and not absent
+                else ("Install the ComfyUI-VideoHelperSuite node pack. " if "VHS_VideoCombine" in absent else "")
+                + (f"Set the [{key}] keys in the comfy-mcp config file to filenames from the installed lists." if missing else ""),
+            }
         return {
             "image_models": image_models,
+            "video_models": video_models,
             "installed": {"diffusion_models": unets, "text_encoders": clips, "vaes": vaes, "loras": loras},
         }
 
     @mcp.tool()
     @friendly
     async def job_status(job_id: str) -> dict[str, Any]:
-        """Peek at a job returned by generate_image/edit_image without waiting."""
+        """Peek at a job returned by generate_image/edit_image/generate_video without waiting."""
         return registry.get(job_id).public()
 
     @mcp.tool(structured_output=False)
     @friendly
     async def wait_for_job(ctx: Context, job_id: str, timeout: float = 120.0, save: bool = True) -> list[Any]:
-        """Block up to `timeout` seconds for a job to finish. Returns the images (preview + saved path)
-        when done, or the job status JSON if still running."""
+        """Block up to `timeout` seconds for a job to finish. Returns the result (preview + saved path)
+        when done, or the job status JSON if still running. Video jobs take minutes: use timeout=600."""
         job = registry.get(job_id)
         if await await_job(ctx, job, timeout):
             return finished_content(job, save)
@@ -403,6 +558,12 @@ def build_server(settings: Settings) -> MCPServer:
         if model:
             return image_model(model.strip().lower()).GUIDANCE
         return "\n\n".join(recipe.GUIDANCE for recipe in IMAGE_MODELS.values())
+
+    @mcp.prompt(name="video_prompt_guidance", description="How to write prompts for the available video models")
+    def video_prompt_guidance(model: str | None = None) -> str:
+        if model:
+            return video_model(model.strip().lower()).GUIDANCE
+        return "\n\n".join(recipe.GUIDANCE for recipe in VIDEO_MODELS.values())
 
     @mcp.resource("comfyui://models", name="models", description="Live model inventory from ComfyUI", mime_type="application/json")
     async def models_resource() -> str:
