@@ -1,0 +1,40 @@
+# comfy-mcp configuration. Every key is optional; these are the defaults.
+# Copy to ~/.config/comfy-mcp/config.toml, or run `comfy-mcp init`.
+
+# ComfyUI HTTP endpoint. Env override: COMFYUI_URL
+comfyui_url = "http://127.0.0.1:8188"
+
+# Where full-resolution results are written on this machine. Env override: COMFY_MCP_OUTPUT_DIR
+output_dir = "~/Pictures/ComfyUI"
+
+# Long edge of the inline JPEG preview returned to the calling model.
+preview_px = 512
+
+# Seconds a generate/edit call blocks before returning a job id for polling.
+max_wait = 120
+
+# Sampling defaults for Qwen Image 2.1.
+default_steps = 25
+default_cfg = 1.0
+
+# Largest canvas accepted (width x height). 2_097_152 = 2 MP.
+max_pixels = 2097152
+
+# Seconds finished-but-unfetched results stay in memory.
+job_ttl = 1800
+
+# Image model used when a call does not pass `model`. Currently only "qwen21" is implemented.
+default_image_model = "qwen21"
+
+# Qwen Image 2.1 files as ComfyUI lists them (see `comfy-mcp check` or the list_models tool).
+# Defaults are Comfy-Org's INT8 repackaged names; change them if you use another precision or renamed files.
+[qwen21]
+diffusion_model = "qwen_image_2.1_int8_convrot.safetensors"
+text_encoder = "qwen3vl_8b_int8_convrot.safetensors"
+vae = "qwen_image_2.1_vae_bf16.safetensors"
+
+# Streamable HTTP mode (`comfy-mcp --http`). Token is required. Env override: COMFY_MCP_HTTP_TOKEN
+[http]
+host = "127.0.0.1"
+port = 8765
+token = ""
