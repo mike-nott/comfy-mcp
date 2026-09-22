@@ -56,7 +56,7 @@ class Job:
             data["images"] = len(self.results)
         if self.saved:
             data["saved"] = list(self.saved)
-        data.update({k: v for k, v in self.params.items() if k in ("seed", "width", "height", "count", "steps", "cfg", "model", "mode", "seconds", "draft")})
+        data.update({k: v for k, v in self.params.items() if k in ("seed", "width", "height", "count", "steps", "cfg", "model", "mode", "seconds", "draft", "accel")})
         return data
 
 
@@ -135,3 +135,7 @@ class JobRegistry:
 
     def active(self) -> list[Job]:
         return [job for job in self._jobs.values() if job.state in ("queued", "running")]
+
+    def active_except(self, job: Job) -> list[Job]:
+        """Other jobs of ours still queued or running (used to avoid unloading models under them)."""
+        return [other for other in self.active() if other.id != job.id]

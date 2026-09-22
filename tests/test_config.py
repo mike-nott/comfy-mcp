@@ -58,3 +58,19 @@ def test_video_section(tmp_path):
     assert settings.minimax_h3.turbo_lora == "my_turbo.safetensors"
     assert settings.minimax_h3.video_vae == "minimax_h3_video_vae_fp16.safetensors"
     assert settings.model_files("minimax_h3") is settings.minimax_h3
+    assert settings.free_models_after == ("video",)
+    path.write_text('free_models_after = ["video", "image"]\n')
+    assert config.load(path, env={}).free_models_after == ("video", "image")
+    path.write_text("free_models_after = []\n")
+    assert config.load(path, env={}).free_models_after == ()
+
+
+def test_accel_section(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('[minimax_h3]\nturbo_lora = "t.safetensors"\n[minimax_h3.accel]\nfirst_block_cache = false\nsol_attn = true\nfbc_threshold = 0.1\ndraft_width = 832\nfbc_node = "MyFBC"\nsol_strict = false\n')
+    settings = config.load(path, env={})
+    a = settings.minimax_h3_accel
+    assert a.first_block_cache is False and a.sol_attn is True and a.fbc_threshold == 0.1 and a.draft_width == 832 and a.fbc_node == "MyFBC"
+    assert a.sage_patch is True and a.final_steps == 20 and a.sol_strict is False and a.fbc_node == "MyFBC"
+    assert config.load(env={}).minimax_h3_accel.fbc_node == "ApplyMiniMaxH3FirstBlockCache"
+    assert settings.minimax_h3.turbo_lora == "t.safetensors"

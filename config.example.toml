@@ -31,6 +31,10 @@ default_image_model = "qwen21"
 default_video_model = "minimax_h3"
 max_video_seconds = 15
 
+# After which kinds of job ComfyUI should unload its models (POST /free). Video models are large and
+# would otherwise stay resident; images stay warm for fast iteration. Options: "video", "image".
+free_models_after = ["video"]
+
 # Qwen Image 2.1 files as ComfyUI lists them (see `comfy-mcp check` or the list_models tool).
 # Defaults are Comfy-Org's INT8 repackaged names; change them if you use another precision or renamed files.
 [qwen21]
@@ -46,6 +50,26 @@ text_encoder = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 video_vae = "minimax_h3_video_vae_fp16.safetensors"
 audio_vae = "minimax_h3_audio_vae_fp32.safetensors"
 turbo_lora = "minimax_h3_turbo_v4_step600_ema.safetensors"
+
+# Acceleration for MiniMax H3 (see README "Speed"). Cache on finals only; drafts render small and upscale.
+# Node class names default to the FirstBlockCache and Sol-Attn packs; override fbc_node / sol_node if yours differ.
+[minimax_h3.accel]
+first_block_cache = true            # finals only; needs ComfyUI-MiniMaxH3-FirstBlockCache
+fbc_threshold = 0.08
+fbc_start_percent = 0.15
+fbc_end_percent = 0.9
+fbc_max_consecutive_hits = 2
+sol_attn = true                     # needs ComfyUI-sol-attn; strict mode fails loudly on fallback
+fused_modulation = false            # sol-attn pack kernel fusion; its modulation patch breaks on ComfyUI 0.36
+chunk_feed_forward = false
+sage_patch = true                   # KJNodes node-scoped Sage, applied before Sol-Attn
+spectrum = false                    # alternative to first_block_cache, never both
+draft_width = 960
+draft_height = 544
+draft_upscale = true
+upscale_model = "2xNomosUni_span_multijpg.safetensors"
+final_steps = 20
+draft_steps = 8
 
 # Streamable HTTP mode (`comfy-mcp --http`). Token is required. Env override: COMFY_MCP_HTTP_TOKEN
 [http]

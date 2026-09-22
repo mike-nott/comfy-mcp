@@ -91,3 +91,70 @@ def test_registry():
     assert video_model("minimax_h3") is minimax_h3 and "minimax_h3" in VIDEO_MODELS
     with pytest.raises(ValueError, match="Unknown video model"):
         video_model("sora")
+
+
+def test_accel_chain_final_and_draft():
+    from comfy_mcp.config import MinimaxH3Accel
+
+    accel = MinimaxH3Accel(sol_attn=True, sage_patch=True, fused_modulation=True, chunk_feed_forward=True)
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=False, seed=1, accel=accel)
+    # order: loader -> Sage KJ -> Sage H3 -> Sol -> Fused -> Chunk FF -> FBC -> (guider + scheduler)
+    assert g["22"]["class_type"] == "PathchSageAttentionKJ" and g["22"]["inputs"] == {"model": ["1", 0], "sage_attention": "auto"}
+    assert g["23"] == {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch", "inputs": {"model": ["22", 0]}}
+    sol = g["24"]
+    assert sol["class_type"] == "MiniMaxH3MemoryEfficientSolAttentionPatch" and sol["inputs"]["model"] == ["23", 0]
+    assert sol["inputs"]["tau"] == 1.3 and sol["inputs"]["strict"] is True and sol["inputs"]["int8_qk"] is True and sol["inputs"]["sink_conditioning"] == "exact_kv_and_rows"
+    assert g["26"] == {"class_type": "MiniMaxH3FusedModulation", "inputs": {"model": ["24", 0], "enabled": True}}
+    assert g["27"]["class_type"] == "MiniMaxH3ChunkFeedForward" and g["27"]["inputs"]["model"] == ["26", 0] and g["27"]["inputs"]["chunks"] == 2
+    fbc = g["25"]
+    assert fbc["class_type"] == "ApplyMiniMaxH3FirstBlockCache" and fbc["inputs"]["model"] == ["27", 0]
+    assert fbc["inputs"]["mode"] == "Custom — manual values" and fbc["inputs"]["threshold"] == 0.08 and fbc["inputs"]["start_percent"] == 0.15
+    assert fbc["inputs"]["end_percent"] == 0.9 and fbc["inputs"]["max_consecutive_hits"] == 2 and fbc["inputs"]["temporal_guard"] is False
+    assert g["8"]["inputs"]["model"] == ["25", 0] and g["10"]["inputs"]["model"] == ["25", 0]
+    assert g["10"]["inputs"]["steps"] == 20 and g["6"]["inputs"]["width"] == 1280 and "28" not in g and "50" not in g
+    assert minimax_h3.required_nodes(accel, draft=False)[-1] == "ApplyMiniMaxH3FirstBlockCache"
+    assert minimax_h3.accel_summary(accel, draft=False) == ["sage", "sol-attn tau 1.3", "fused-mod", "chunk-ff", "fbc@0.08"]
+
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=True, seed=1, accel=accel)
+    # draft: turbo LoRA first, no cache, small canvas, SPAN upscale then rescale to the final canvas
+    assert g["20"]["inputs"]["model"] == ["1", 0] and g["22"]["inputs"]["model"] == ["20", 0]
+    assert "25" not in g and g["8"]["inputs"]["model"] == ["27", 0]
+    assert g["6"]["inputs"]["width"] == 960 and g["6"]["inputs"]["height"] == 544 and g["10"]["inputs"]["steps"] == 8
+    assert g["50"]["inputs"]["model_name"] == "2xNomosUni_span_multijpg.safetensors"
+    assert g["51"]["inputs"]["image"] == ["12", 0] and g["52"]["inputs"] == {"image": ["51", 0], "upscale_method": "lanczos", "width": 1280, "height": 704, "crop": "disabled"}
+    assert g[minimax_h3.VIDEO_NODE]["inputs"]["images"] == ["52", 0] and g["16"]["inputs"]["image"] == ["52", 0]
+    assert "ImageUpscaleWithModel" in minimax_h3.required_nodes(accel, draft=True)
+    assert minimax_h3.accel_summary(accel, draft=True)[-1] == "draft 960x544+upscale"
+
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="portrait", draft=True, seed=1, accel=accel)
+    assert (g["6"]["inputs"]["width"], g["6"]["inputs"]["height"]) == (544, 960)
+
+
+def test_accel_variants():
+    from comfy_mcp.config import MinimaxH3Accel
+
+    # Sage without the KJ node, and Spectrum instead of FBC
+    accel = MinimaxH3Accel(sage_patch=True, sage_kj_node="", sol_attn=False, spectrum=True, first_block_cache=False)
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=False, seed=1, accel=accel)
+    assert "22" not in g and g["23"]["inputs"]["model"] == ["1", 0]
+    assert g["28"]["class_type"] == "SpectrumApplyMiniMaxH3" and g["28"]["inputs"]["model"] == ["23", 0] and g["28"]["inputs"]["blend_weight"] == 0.5
+    assert "25" not in g and g["8"]["inputs"]["model"] == ["28", 0]
+    assert "SpectrumApplyMiniMaxH3" in minimax_h3.required_nodes(accel, draft=False) and "SpectrumApplyMiniMaxH3" not in minimax_h3.required_nodes(accel, draft=True)
+    with pytest.raises(ValueError, match="spectrum and first_block_cache"):
+        minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=False, seed=1, accel=MinimaxH3Accel(spectrum=True))
+
+
+def test_accel_defaults_and_steps_override():
+    from comfy_mcp.config import MinimaxH3Accel
+
+    accel = MinimaxH3Accel()  # defaults: sage + sol + fbc on, fusion/spectrum off, upscale on
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=False, seed=1, accel=accel, steps=14)
+    assert g["22"]["inputs"]["model"] == ["1", 0] and g["24"]["inputs"]["model"] == ["23", 0] and "26" not in g and "28" not in g
+    assert g["25"]["inputs"]["model"] == ["24", 0] and g["10"]["inputs"]["steps"] == 14
+    off = MinimaxH3Accel(first_block_cache=False, draft_upscale=False, sol_attn=False, sage_patch=False)
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=True, seed=1, accel=off)
+    assert "25" not in g and "50" not in g and "22" not in g and g["6"]["inputs"]["width"] == 960 and g[minimax_h3.VIDEO_NODE]["inputs"]["images"] == ["12", 0]
+    assert minimax_h3.required_nodes(off, draft=True) == minimax_h3.REQUIRED_NODES
+    # no accel object: legacy behaviour
+    g, _ = minimax_h3.graph(FILES, prompt="p", mode="t2v", images=[], audio_token=None, seconds=5, orientation="landscape", draft=False, seed=1)
+    assert g["8"]["inputs"]["model"] == ["1", 0] and g["10"]["inputs"]["steps"] == 20

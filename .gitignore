@@ -8,3 +8,5 @@ build/
 .ruff_cache/
 config.toml
 .runtime/
+research_notes/
+reports/

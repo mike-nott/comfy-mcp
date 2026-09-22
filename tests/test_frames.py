@@ -52,3 +52,23 @@ def test_temp_siblings():
     assert temp_siblings("mcp-ab_00001-audio.mp4") == ["mcp-ab_00001-audio.mp4", "mcp-ab_00001.mp4", "mcp-ab_00001.png"]
     assert temp_siblings("mcp-ab_00001.mp4") == ["mcp-ab_00001.mp4", "mcp-ab_00001.png"]
     assert temp_siblings("noext") == ["noext"]
+
+
+async def test_loader_choices_both_schema_shapes():
+    from comfy_mcp.comfy import ComfyClient
+
+    client = ComfyClient("http://example.invalid")
+    schemas = {
+        "UNETLoader": {"UNETLoader": {"input": {"required": {"unet_name": [["a.safetensors", "b.safetensors"], {}]}}}},
+        "UpscaleModelLoader": {"UpscaleModelLoader": {"input": {"required": {"model_name": ["COMBO", {"options": ["span.safetensors"]}]}}}},
+        "Nothing": {},
+    }
+
+    async def fake_json(method, path, **kwargs):
+        return schemas[path.rsplit("/", 1)[1]]
+
+    client._json = fake_json  # type: ignore[method-assign]
+    assert await client.loader_choices("UNETLoader", "unet_name") == ["a.safetensors", "b.safetensors"]
+    assert await client.loader_choices("UpscaleModelLoader", "model_name") == ["span.safetensors"]
+    assert await client.loader_choices("Nothing", "x") == []
+    await client.aclose()

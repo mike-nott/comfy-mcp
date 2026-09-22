@@ -137,11 +137,32 @@ def build_server(settings: Settings) -> MCPServer:
                 + f". Call list_models to see what is installed and set the [{key}] keys in the comfy-mcp config file."
             )
         if kind == "video":
-            absent = await missing_nodes(recipe.REQUIRED_NODES)
+            needed = recipe.required_nodes(settings.minimax_h3_accel, draft=False) + recipe.required_nodes(settings.minimax_h3_accel, draft=True)
+            absent = await missing_nodes(tuple(dict.fromkeys(needed)))
             if absent:
                 hint = " Install the ComfyUI-VideoHelperSuite custom node pack." if "VHS_VideoCombine" in absent else ""
+                if any(n in absent for n in recipe.required_nodes(settings.minimax_h3_accel, False) + recipe.required_nodes(settings.minimax_h3_accel, True) if n not in recipe.REQUIRED_NODES):
+                    hint += " Install the acceleration node pack(s) or turn the option off under [minimax_h3.accel]."
                 raise ComfyError(f"ComfyUI is missing node(s) needed for {recipe.NAME} video: {', '.join(absent)}.{hint}")
         ready_until[key] = time.monotonic() + 60.0
+
+    async def adapt_to_schema(graph: dict, node_ids: tuple[str, ...]) -> list[str]:
+        """Drop inputs an optional patch node does not declare (packs differ in option names) so a
+        config mismatch degrades to defaults instead of a ComfyUI validation error. Returns notes."""
+        notes = []
+        for node_id in node_ids:
+            node = graph.get(node_id)
+            if not node:
+                continue
+            info = await client.object_info(node["class_type"])
+            declared = set(info.get("input", {}).get("required", {})) | set(info.get("input", {}).get("optional", {}))
+            if not declared:
+                continue
+            for name in list(node["inputs"]):
+                if name not in declared and name != "model":
+                    notes.append(f"{node['class_type']} ignores '{name}' (not in its schema)")
+                    del node["inputs"][name]
+        return notes
 
     def resolve_model(model: str | None):
         key = (model or settings.default_image_model).strip().lower()
@@ -170,6 +191,9 @@ def build_server(settings: Settings) -> MCPServer:
             finally:
                 for token in temp_tokens or []:
                     await client.scrub_temp(token)
+                if media in settings.free_models_after and not registry.active_except(job):
+                    job.message = "unloading models"
+                    await client.free_models()
 
         async def _run(job: Job):
 
@@ -267,7 +291,10 @@ def build_server(settings: Settings) -> MCPServer:
             f"{params['model']} · {params['mode']} · {params['width']}×{params['height']} · {params['seconds']} s · seed {params['seed']}"
             f" · {params['steps']} steps{' (draft)' if params.get('draft') else ''} · {run_time:.1f} s"
         )
+        if params.get("accel"):
+            head += " · accel: " + ", ".join(params["accel"])
         lines = [head]
+        lines += [f"note: {note}" for note in params.get("notes", [])]
         if save:
             if job.saved is None:
                 job.saved = [str(save_bytes(data, settings.output_dir, params["seed"], i, len(job.files), _ext(name))) for i, (name, data) in enumerate(job.files)]
@@ -410,6 +437,7 @@ def build_server(settings: Settings) -> MCPServer:
         orientation: str = "landscape",
         draft: bool = False,
         seed: int | None = None,
+        steps: int | None = None,
         save: bool = True,
         wait: float = 0.0,
     ) -> list[Any]:
@@ -420,7 +448,8 @@ def build_server(settings: Settings) -> MCPServer:
         of a subject/style (not a starting frame); "refav" references plus audio=<clip path> to follow.
         seconds: 5-15, snapped to the model's frame grid (the effective length is returned).
         orientation: "landscape" (1280×704) or "portrait" (704×1280).
-        draft=true: 8-step turbo preview (t2v/i2v only, much faster); reuse the seed for the final.
+        draft=true: 8-step turbo preview rendered small and upscaled (t2v/i2v only, much faster);
+        reuse the seed for the final. steps: override the step count (final default 20, draft 8).
         save=true writes the MP4 to the configured output folder; the result carries the path and a
         first-frame preview. wait>0 blocks up to that many seconds before returning the job_id.
         """
@@ -443,16 +472,21 @@ def build_server(settings: Settings) -> MCPServer:
             data, suffix = await asyncio.to_thread(load_audio_input, audio)
             audio_token = await client.upload_temp(data, suffix, "application/octet-stream")
             temp_tokens.append(audio_token)
+        if steps is not None and not 1 <= steps <= 60:
+            raise ValueError("steps must be between 1 and 60")
         chosen = _seed(seed)
+        accel = settings.minimax_h3_accel
         graph, frame_count = recipe.graph(
             settings.model_files(key), prompt=prompt, mode=mode, images=references, audio_token=audio_token,
-            seconds=seconds, orientation=orientation, draft=draft, seed=chosen,
+            seconds=seconds, orientation=orientation, draft=draft, seed=chosen, steps=steps, accel=accel,
         )
+        notes = await adapt_to_schema(graph, recipe.PATCH_NODES)
         width, height = recipe.canvas(orientation)
         params = {
             "model": recipe.NAME, "model_key": key, "mode": mode, "seed": chosen, "width": width, "height": height,
-            "seconds": recipe.seconds_for(frame_count), "frames": frame_count, "steps": recipe.DRAFT_STEPS if draft else recipe.FINAL_STEPS,
+            "seconds": recipe.seconds_for(frame_count), "frames": frame_count, "steps": graph["10"]["inputs"]["steps"],
             "draft": draft, "references": len(references), "audio": bool(audio_token),
+            "accel": recipe.accel_summary(accel, draft), "notes": notes,
         }
         job = start_job("video", params, graph, 1, recipe.POSTER_NODE, temp_tokens=temp_tokens, media="video", history_node=recipe.VIDEO_NODE)
         if wait > 0 and await await_job(ctx, job, wait):
@@ -498,6 +532,9 @@ def build_server(settings: Settings) -> MCPServer:
             files = settings.model_files(key)
             missing = missing_files(key, unets, clips, vaes, loras)
             absent = await missing_nodes(recipe.REQUIRED_NODES)
+            accel = settings.minimax_h3_accel
+            accel_names = tuple(n for n in (accel.fbc_node, accel.sol_node, accel.fused_modulation_node, accel.chunk_ff_node, accel.spectrum_node, accel.sage_kj_node, accel.sage_h3_node, "UpscaleModelLoader") if n)
+            accel_absent = set(await missing_nodes(accel_names))
             video_models[key] = {
                 "name": recipe.NAME,
                 "default": key == settings.default_video_model,
@@ -507,6 +544,10 @@ def build_server(settings: Settings) -> MCPServer:
                 "ready": not missing and not absent,
                 "missing": missing,
                 "missing_nodes": absent,
+                "accel": {
+                    "enabled": recipe.accel_summary(accel, draft=False) + recipe.accel_summary(accel, draft=True),
+                    "nodes_present": {name: name not in accel_absent for name in accel_names},
+                },
                 "hint": None
                 if not missing and not absent
                 else ("Install the ComfyUI-VideoHelperSuite node pack. " if "VHS_VideoCombine" in absent else "")

@@ -125,11 +125,20 @@ class ComfyClient:
         return data.get(node, {}) if isinstance(data, dict) else {}
 
     async def loader_choices(self, node: str, field: str) -> list[str]:
+        """Choices of a loader's file combo. Handles both schema shapes: `[[choices], {...}]`
+        and the V3 form `["COMBO", {"options": [choices]}]`."""
         info = await self.object_info(node)
         try:
-            return list(info["input"]["required"][field][0])
-        except (KeyError, IndexError, TypeError):
+            spec = info["input"]["required"][field]
+        except (KeyError, TypeError):
             return []
+        if not spec:
+            return []
+        if isinstance(spec[0], list):
+            return [str(x) for x in spec[0]]
+        if len(spec) > 1 and isinstance(spec[1], dict) and isinstance(spec[1].get("options"), list):
+            return [str(x) for x in spec[1]["options"]]
+        return []
 
     async def status(self) -> dict[str, Any]:
         stats, queue = await asyncio.gather(self.system_stats(), self.queue())
@@ -221,6 +230,13 @@ class ComfyClient:
                 raise ComfyError("ComfyUI recorded an execution error for this prompt")
             await asyncio.sleep(0.25 * (attempt + 1))
         raise ComfyError(f"ComfyUI history has no output for node {node}")
+
+    async def free_models(self) -> None:
+        """Ask ComfyUI to unload every cached model and release memory (POST /free). Best effort."""
+        try:
+            await self._json("POST", "/free", json={"unload_models": True, "free_memory": True})
+        except ComfyError as error:
+            self._log("free failed:", error)
 
     async def delete_history(self, prompt_id: str) -> None:
         try:

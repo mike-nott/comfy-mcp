@@ -249,3 +249,19 @@ async def test_video_r2v_and_refav(tmp_path):
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
         w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 16000))) for i in range(16000 * 3)))
     await _run_video(client, {"prompt": "The robot from the reference hums along to the tone while nodding", "mode": "refav", "images": [path], "audio": str(clip), "seconds": 5, "seed": 14}, "refav · 1280×704")
+
+
+async def test_video_bench(tmp_path):
+    """One measured H3 render with settings supplied by environment, for A/B runs.
+
+    COMFY_MCP_BENCH_CONFIG: TOML text for the server config (e.g. a [minimax_h3.accel] block).
+    COMFY_MCP_BENCH_ARGS: JSON for generate_video's arguments; seed should vary between runs so
+    ComfyUI's execution cache cannot serve a cached sampler result.
+    """
+    cfg = os.environ.get("COMFY_MCP_BENCH_CONFIG")
+    args = os.environ.get("COMFY_MCP_BENCH_ARGS")
+    if not cfg or not args:
+        pytest.skip("set COMFY_MCP_BENCH_CONFIG and COMFY_MCP_BENCH_ARGS")
+    async with mcp_session(tmp_path, cfg) as client:
+        text, saved = await _run_video(client, json.loads(args), "MiniMax H3 ·", timeout=2400)
+        print("BENCH_RESULT", text.splitlines()[0], saved[0])

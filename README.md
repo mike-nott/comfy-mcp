@@ -43,6 +43,7 @@ default_cfg   = 1.0
 max_pixels    = 2097152  # 2 MP canvas cap
 job_ttl       = 1800     # seconds unfetched results stay in memory
 default_image_model = "qwen21"   # used when a call omits `model`
+free_models_after = ["video"]    # unload ComfyUI's models after these job kinds; images stay warm
 
 [qwen21]                 # the three files as ComfyUI lists them; defaults are Comfy-Org's INT8 names
 diffusion_model = "qwen_image_2.1_int8_convrot.safetensors"
@@ -97,6 +98,22 @@ then point the client at `http://<host>:8765/mcp` with `Authorization: Bearer <t
 
 Adding a model is a recipe module plus a config section; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Speed (MiniMax H3)
+
+Video is compute-bound in the sampler, so the levers are the attention kernel, cross-step caching and how much you render. The `[minimax_h3.accel]` config section controls what comfy-mcp adds to the graph, in the order the packs require (Sage → Sol-Attn → fused modulation → chunked feed-forward → Spectrum or FirstBlockCache, with the patched model feeding both scheduler and guider):
+
+- `first_block_cache` (default on, finals only): needs the [FirstBlockCache](https://github.com/duckyshell/ComfyUI-MiniMaxH3-FirstBlockCache) pack; settings default to the 20-step-safe values.
+- `sol_attn` (default on): sparse attention via the [Sol-Attn](https://github.com/Saganaki22/ComfyUI-sol-attn) pack's H3 patch, run in strict mode so a fallback fails loudly instead of silently rendering dense.
+- `sage_patch` (default on): node-scoped SageAttention through KJNodes, applied before Sol-Attn. Leave ComfyUI's global `--use-sage-attention` flag off with H3.
+- `fused_modulation` and `chunk_feed_forward` (default off): kernel-fusion nodes from the Sol-Attn pack; the modulation patch is incompatible with ComfyUI 0.36's H3 block.
+- `spectrum` (default off): step forecasting as an alternative to FirstBlockCache; the two must not be combined.
+- Drafts render at `draft_width`×`draft_height` and are upscaled with a small SPAN model (`upscale_model` in `models/upscale_models`) back to the final canvas; caching is not applied to drafts because turbo schedules have little to reuse.
+- `steps` on `generate_video` overrides the step count; `final_steps` / `draft_steps` set the defaults.
+
+Node class names (`fbc_node`, `sol_node`, …) are overridable, and any option a node does not declare is dropped with a note in the result rather than failing the render. `list_models` reports which acceleration nodes are present.
+
+Measured on a DGX Spark (5 s clip, 1280×704, ComfyUI 0.36, INT8 ConvRot files, seeds varied): plain attention 887 s; FirstBlockCache 683 s; plus Sol-Attn 496 s; plus the Sage patch 479 s. The draft profile with Sol-Attn renders in 197 s.
+
 ## Host timeouts
 
 An image render takes 20–60 s, longer when the GPU is shared. Video is much slower (on a DGX Spark sharing memory with a 27B LLM, a 5 s MiniMax H3 clip took about 6 minutes as an 8-step draft and 12 minutes at the final 20 steps) which is why `generate_video` never blocks: it returns a `job_id` and `wait_for_job` does the waiting in chunks of whatever your host allows. For images, every MCP host applies its own timeout to a tool call, and if that is shorter than the render the host reports an unknown outcome even though the job completes and the file is saved. Two ways to avoid it:
@@ -128,6 +145,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how a call flows through ComfyUI.
 What this server does:
 
 - Output images travel over the websocket (`SaveImageWebsocket`); no `SaveImage`, nothing in ComfyUI's `output/`.
+- After a video job (configurable with `free_models_after`) the server asks ComfyUI to unload its models, so the multi-GB video encoder and model do not stay resident on a box shared with other services. Image models stay warm for fast iteration.
 - Video is written by VideoHelperSuite to ComfyUI's `temp/` folder (never `output/`), fetched once, then every file it left (the MP4, the video-only intermediate and the first-frame PNG) is overwritten with a 1×1 blank. The first-frame preview comes over the websocket like an image. Video metadata embedding is off, so the prompt is not stored in the file.
 - Reference images are uploaded with `type=temp` under random names and referenced as `name [temp]`. Nothing goes to `input/`. As soon as the job finishes, each temp file is overwritten with a 1×1 blank PNG (ComfyUI has no delete endpoint); the empty files vanish when ComfyUI restarts.
 - `POST /history {"delete": [prompt_id]}` runs as soon as the prompt finishes, success or failure.
