@@ -26,6 +26,8 @@ comfy-mcp check     # prints resolved settings and the ComfyUI status
 
 Or run it ad hoc without installing: `uvx --from git+https://github.com/mike-nott/comfy-mcp comfy-mcp`.
 
+Upgrade with `uv tool upgrade comfy-mcp`. Every release bumps the version, which is what makes that command fetch the new code.
+
 ## Configure
 
 `~/.config/comfy-mcp/config.toml` (or `--config PATH`, or `$COMFY_MCP_CONFIG`). Every key is optional:
