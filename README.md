@@ -57,22 +57,22 @@ token = ""               # required, ≥16 chars; env: COMFY_MCP_HTTP_TOKEN
 **Claude Code**
 
 ```bash
-claude mcp add comfy -- comfy-mcp
+claude mcp add --scope user comfy-mcp -- comfy-mcp
 # or without installing:
-claude mcp add comfy -- uvx --from git+https://github.com/mike-nott/comfy-mcp comfy-mcp
+claude mcp add --scope user comfy-mcp -- uvx --from git+https://github.com/mike-nott/comfy-mcp comfy-mcp
 ```
 
 **Codex** — `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.comfy]
+[mcp_servers.comfy-mcp]
 command = "comfy-mcp"
 ```
 
 **Any stdio host (OMP, Cursor, LM Studio, …)** — the generic JSON shape:
 
 ```json
-{ "mcpServers": { "comfy": { "command": "comfy-mcp", "args": [] } } }
+{ "mcpServers": { "comfy-mcp": { "command": "comfy-mcp", "args": [] } } }
 ```
 
 **Streamable HTTP clients (browser chat UIs such as [vllm-chat](https://github.com/mike-nott/vllm-chat))** — run the server once, on the ComfyUI box or your workstation:
