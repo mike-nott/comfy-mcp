@@ -23,7 +23,7 @@ from .jobs import Job, JobRegistry
 from .recipes import IMAGE_MODELS, image_model
 
 INSTRUCTIONS = (
-    "Private image generation on a self-hosted ComfyUI. "
+    "Private media generation on a self-hosted ComfyUI; call list_models to see which models are available. "
     "generate_image makes new images from text; edit_image changes or combines existing images given as file paths or base64. "
     "A call normally takes 20-60 seconds and blocks until the image is ready. If the server is busy the call may return a job_id "
     "instead; poll it with wait_for_job or fetch_result. Results include a small preview and the path of the saved full-size PNG. "
@@ -73,7 +73,7 @@ def build_server(settings: Settings) -> MCPServer:
     registry = JobRegistry(settings.job_ttl)
     mcp = MCPServer(
         "comfy",
-        title="ComfyUI (Qwen Image 2.1)",
+        title="ComfyUI",
         version=__version__,
         instructions=INSTRUCTIONS,
         log_level="DEBUG" if settings.debug else "ERROR",

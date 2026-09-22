@@ -1,12 +1,12 @@
 [project]
 name = "comfy-mcp"
 version = "0.1.0"
-description = "MCP server for private one-shot image generation on your own ComfyUI (Qwen Image 2.1)"
+description = "MCP server for private one-shot media generation on your own ComfyUI"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Mike Nott", email = "mike@nott.org" }]
 requires-python = ">=3.12"
-keywords = ["mcp", "comfyui", "qwen-image", "image-generation"]
+keywords = ["mcp", "comfyui", "image-generation", "qwen-image", "self-hosted"]
 dependencies = [
     "httpx>=0.28.1",
     "mcp>=2.2",

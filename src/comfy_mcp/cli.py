@@ -10,7 +10,7 @@ from .config import DEFAULT_PATH, load, write_example
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="comfy-mcp", description="MCP server for one-shot image generation on a private ComfyUI.")
+    parser = argparse.ArgumentParser(prog="comfy-mcp", description="MCP server for private one-shot media generation on your own ComfyUI.")
     parser.add_argument("--config", help=f"settings file (default: $COMFY_MCP_CONFIG or {DEFAULT_PATH})")
     parser.add_argument("--http", action="store_true", help="serve Streamable HTTP with a bearer token instead of stdio")
     parser.add_argument("--debug", action="store_true", help="terse diagnostics on stderr (never a file)")

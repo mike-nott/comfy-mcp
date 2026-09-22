@@ -1,17 +1,18 @@
 # comfy-mcp
 
-One-shot, private image generation from any MCP host, backed by a self-hosted [ComfyUI](https://github.com/comfyanonymous/ComfyUI) running **Qwen Image 2.1**. Ask Claude Code, Codex or any other MCP client for an image and get back a preview plus a full-size PNG on your own machine.
+An MCP server that turns a self-hosted [ComfyUI](https://github.com/comfyanonymous/ComfyUI) into one-shot, private media generation for any MCP host. Ask Claude Code, Codex or any other MCP client for an image and get back a preview plus a full-size file on your own machine, with nothing left behind on the server.
 
-- Plain parameters, no node graphs: `generate_image`, `edit_image` (one reference or 2–4 references composed), `server_status`, `list_models`, job tools for long waits. Tools take a `model` key; Qwen Image 2.1 (`qwen21`) is the first model, and new ones slot in without changing the tool surface.
+- Plain parameters, no node graphs: `generate_image`, `edit_image` (one reference or 2–4 references composed), `server_status`, `list_models`, job tools for long waits.
+- Model-agnostic tool surface: every generation tool takes a `model` key, and each model is a small self-contained recipe with its own config section. The first bundled model is **Qwen Image 2.1** (`qwen21`); video and music models are next (see roadmap).
 - Private by construction: results stream back over the websocket and are **never written to the ComfyUI server's disk**; reference images go to ComfyUI's throwaway temp folder; the prompt's history entry is deleted as soon as the result arrives; this server keeps no logs, cache or transcripts.
 - Always queues politely behind other ComfyUI jobs and reports its position.
 - stdio transport for CLI hosts; optional Streamable HTTP with a bearer token for browser chat UIs.
 
-Developed against a DGX Spark; works with any ComfyUI ≥ 0.36 that has the Qwen Image 2.1 files installed.
+Developed against a DGX Spark; works with any ComfyUI ≥ 0.36 that has the files for at least one bundled model installed.
 
 ## Requirements
 
-- ComfyUI 0.36+ reachable over HTTP with Qwen Image 2.1 installed: a diffusion model, its Qwen3-VL text encoder and the 2.1 VAE. The defaults expect Comfy-Org's INT8 names (`qwen_image_2.1_int8_convrot`, `qwen3vl_8b_int8_convrot`, `qwen_image_2.1_vae_bf16`); other precisions or renamed files go in the `[qwen21]` section of the config.
+- ComfyUI 0.36+ reachable over HTTP, with the model files for at least one bundled model. For `qwen21` that is a Qwen Image 2.1 diffusion model, its Qwen3-VL text encoder and the 2.1 VAE; the defaults expect Comfy-Org's INT8 names (`qwen_image_2.1_int8_convrot`, `qwen3vl_8b_int8_convrot`, `qwen_image_2.1_vae_bf16`), and other precisions or renamed files go in the `[qwen21]` config section. `list_models` tells you what is ready.
   The bundled `SaveImageWebsocket` custom node (ships with ComfyUI in `custom_nodes/websocket_image_save.py`) must be enabled.
 - [uv](https://docs.astral.sh/uv/) on the client machine. Python 3.12+ is fetched automatically.
 
@@ -82,6 +83,17 @@ COMFY_MCP_HTTP_TOKEN=$(openssl rand -hex 24) comfy-mcp --http   # or set [http] 
 
 then point the client at `http://<host>:8765/mcp` with `Authorization: Bearer <token>`. Bind `[http] host = "0.0.0.0"` to serve the LAN.
 
+## Models
+
+| Key | Model | Tools | Status |
+|---|---|---|---|
+| `qwen21` | Qwen Image 2.1 | `generate_image`, `edit_image` | bundled |
+| — | MiniMax H3 video | `generate_video` | planned (v2) |
+| — | MiniMax Music 3 | `generate_music` | planned (v2) |
+| — | Krea2, Ideogram 4, FLUX.2 Klein | `generate_image`, `edit_image` | candidates |
+
+Adding a model is a recipe module plus a config section; see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Tools
 
 | Tool | What it does |
@@ -120,7 +132,7 @@ uv run mcp dev src/comfy_mcp/dev.py          # MCP Inspector
 
 ## Roadmap
 
-v2 adds MiniMax H3 video (`generate_video`) and MiniMax Music 3 (`generate_music`) through the same job tools. Further image models such as Krea2, Ideogram 4 and FLUX.2 Klein arrive as new `model` keys on the existing tools rather than new tools.
+v2 adds MiniMax H3 video (`generate_video`) and MiniMax Music 3 (`generate_music`) through the same job tools. Further image models arrive as new `model` keys on the existing tools rather than new tools.
 
 ## License
 
