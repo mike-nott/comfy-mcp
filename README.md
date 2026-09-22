@@ -94,6 +94,15 @@ then point the client at `http://<host>:8765/mcp` with `Authorization: Bearer <t
 
 Adding a model is a recipe module plus a config section; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Host timeouts
+
+A render takes 20–60 s, longer when the GPU is shared. Every MCP host applies its own timeout to a tool call, and if that is shorter than the render the host reports an unknown outcome even though the job completes and the file is saved. Two ways to avoid it:
+
+- **Raise the host's timeout** so calls finish inline. OMP: add `"timeout": 180000` (milliseconds) to the server entry in `mcp.json`. Claude Code and Codex have their own settings for MCP tool timeouts; see their documentation.
+- **Or lower comfy-mcp's wait** below the host's timeout, per host, with `COMFY_MCP_MAX_WAIT` in the server entry's `env`. The call then returns a `job_id` in time and the model finishes with `wait_for_job`.
+
+Either way nothing is lost: a job that was already delivered to a caller that gave up can be fetched again with `fetch_result`, and `server_status` lists active jobs.
+
 ## Tools
 
 | Tool | What it does |

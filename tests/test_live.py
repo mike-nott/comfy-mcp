@@ -123,8 +123,12 @@ async def test_job_flow_when_wait_is_short(tmp_path):
     print("\n" + text)
     assert not done.is_error, text
     assert "seed 99" in text and "saved:" in text and len(_images(done)) == 1
-    gone = await client.call_tool("job_status", {"job_id": pending["job_id"]})
-    assert gone.is_error
+    path = [line for line in text.splitlines() if line.startswith("saved:")][0]
+    # A second delivery (e.g. after the first caller's client timed out) returns the same file, not an error.
+    again = await client.call_tool("fetch_result", {"job_id": pending["job_id"]})
+    assert not again.is_error and path in _text(again) and len(_images(again)) == 1
+    status = json.loads(_text(await client.call_tool("job_status", {"job_id": pending["job_id"]})))
+    assert status["state"] == "done" and status["saved"] == [path.split("saved: ", 1)[1]]
 
 
 async def test_bad_reference_is_a_clean_error(tmp_path):

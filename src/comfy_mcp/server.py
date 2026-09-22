@@ -181,12 +181,14 @@ def build_server(settings: Settings) -> MCPServer:
         return True
 
     def finished_content(job: Job, save: bool) -> list[Any]:
+        """Build the result for a finished job. Safe to call more than once: a job that was already
+        delivered (for example by a call whose client timed out) returns the same saved paths."""
         if job.state == "error":
             raise ComfyError(job.error or "generation failed")
         if job.state == "cancelled":
             raise ComfyError("the job was cancelled")
         if not job.results:
-            raise ComfyError("the job finished without images")
+            raise ComfyError("the job finished without images" if job.finished else f"the job is still {job.state}")
         params = job.params
         width, height = dimensions(job.results[0])
         run_time = (job.finished or time.monotonic()) - (job.started or job.created)
@@ -196,17 +198,15 @@ def build_server(settings: Settings) -> MCPServer:
         )
         lines = [head]
         content: list[Any] = []
+        if save and job.saved is None:
+            job.saved = [str(save_png(png, settings.output_dir, params["seed"], index, len(job.results))) for index, png in enumerate(job.results)]
         for index, png in enumerate(job.results):
             if save:
-                path = save_png(png, settings.output_dir, params["seed"], index, len(job.results))
-                lines.append(f"saved: {path}")
+                lines.append(f"saved: {job.saved[index]}")
             else:
                 lines.append(f"image {index + 1} png_base64: {base64.b64encode(png).decode()}")
             content.append(Image(data=preview_jpeg(png, settings.preview_px), format="jpeg"))
         content.insert(0, "\n".join(lines))
-        job.results = None if save else job.results
-        if save:
-            registry.forget(job.id)
         return content
 
     def pending_content(job: Job) -> str:
@@ -377,7 +377,8 @@ def build_server(settings: Settings) -> MCPServer:
     @mcp.tool(structured_output=False)
     @friendly
     async def fetch_result(job_id: str, save: bool = True) -> list[Any]:
-        """Return the images of a finished job (preview + saved path). Fails if the job is not done yet."""
+        """Return the images of a finished job (preview + saved path). Works again for a job that was already
+        delivered, returning the same paths. Fails if the job is not done yet."""
         job = registry.get(job_id)
         if job.state in ("queued", "running"):
             raise ComfyError(f"job {job_id} is still {job.state}: {job.message}")

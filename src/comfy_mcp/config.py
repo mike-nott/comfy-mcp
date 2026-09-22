@@ -25,7 +25,8 @@ output_dir = "~/Pictures/ComfyUI"
 # Long edge of the inline JPEG preview returned to the calling model.
 preview_px = 512
 
-# Seconds a generate/edit call blocks before returning a job id for polling.
+# Seconds a generate/edit call blocks before returning a job id for polling. Keep this below your
+# host's MCP tool-call timeout (see README "Host timeouts"). Env override: COMFY_MCP_MAX_WAIT
 max_wait = 120
 
 # Sampling defaults for Qwen Image 2.1.
@@ -144,6 +145,8 @@ def load(explicit: str | Path | None = None, *, debug: bool = False, env: dict[s
         settings.output_dir = Path(env["COMFY_MCP_OUTPUT_DIR"]).expanduser()
     if env.get("COMFY_MCP_HTTP_TOKEN"):
         settings.http.token = env["COMFY_MCP_HTTP_TOKEN"]
+    if env.get("COMFY_MCP_MAX_WAIT"):
+        settings.max_wait = float(env["COMFY_MCP_MAX_WAIT"])
     return settings
 
 

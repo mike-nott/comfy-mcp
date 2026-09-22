@@ -24,6 +24,7 @@ class Job:
     progress: tuple[int, int] | None = None
     message: str = "submitting"
     results: list[bytes] | None = None
+    saved: list[str] | None = None  # paths written by an earlier delivery of this job
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
     cancel_hook: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
@@ -49,6 +50,8 @@ class Job:
             data["error"] = self.error
         if self.results is not None:
             data["images"] = len(self.results)
+        if self.saved:
+            data["saved"] = list(self.saved)
         data.update({k: v for k, v in self.params.items() if k in ("seed", "width", "height", "count", "steps", "cfg", "model")})
         return data
 

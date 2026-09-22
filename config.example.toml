@@ -10,7 +10,8 @@ output_dir = "~/Pictures/ComfyUI"
 # Long edge of the inline JPEG preview returned to the calling model.
 preview_px = 512
 
-# Seconds a generate/edit call blocks before returning a job id for polling.
+# Seconds a generate/edit call blocks before returning a job id for polling. Keep this below your
+# host's MCP tool-call timeout (see README "Host timeouts"). Env override: COMFY_MCP_MAX_WAIT
 max_wait = 120
 
 # Sampling defaults for Qwen Image 2.1.

@@ -15,7 +15,8 @@ def test_defaults_without_file(tmp_path, monkeypatch):
 def test_file_and_env_override(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('comfyui_url = "http://gpu-box:8188/"\noutput_dir = "/tmp/out"\npreview_px = 256\n[http]\nport = 9000\ntoken = "abc"\n[qwen21]\nvae = "custom_vae.safetensors"\n')
-    settings = config.load(path, env={"COMFYUI_URL": "http://other:1", "COMFY_MCP_HTTP_TOKEN": "envtoken"})
+    settings = config.load(path, env={"COMFYUI_URL": "http://other:1", "COMFY_MCP_HTTP_TOKEN": "envtoken", "COMFY_MCP_MAX_WAIT": "25"})
+    assert settings.max_wait == 25.0
     assert settings.comfyui_url == "http://other:1"
     assert settings.output_dir == Path("/tmp/out")
     assert settings.preview_px == 256
