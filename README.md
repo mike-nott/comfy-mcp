@@ -46,6 +46,7 @@ save_policy   = "default"  # "default" | "never" | "always"; env: COMFY_MCP_SAVE
 default_image_model = "qwen21"   # used when a call omits `model`
 free_models_after = ["video"]    # unload ComfyUI's models after these job kinds; images stay warm
 
+# The full set of keys, including [minimax_h3] video files and [minimax_h3.accel], is in config.example.toml.
 [qwen21]                 # the three files as ComfyUI lists them; defaults are Comfy-Org's INT8 names
 diffusion_model = "qwen_image_2.1_int8_convrot.safetensors"
 text_encoder    = "qwen3vl_8b_int8_convrot.safetensors"
@@ -132,7 +133,7 @@ Measured on a DGX Spark (5 s clip, 1280×704, ComfyUI 0.36, INT8 ConvRot files, 
 
 ## Host timeouts
 
-An image render takes 20–60 s, longer when the GPU is shared. Video is much slower (on a DGX Spark sharing memory with a 27B LLM, a 5 s MiniMax H3 clip took about 6 minutes as an 8-step draft and 12 minutes at the final 20 steps) which is why `generate_video` never blocks: it returns a `job_id` and `wait_for_job` does the waiting in chunks of whatever your host allows. For images, every MCP host applies its own timeout to a tool call, and if that is shorter than the render the host reports an unknown outcome even though the job completes and the file is saved. Two ways to avoid it:
+An image render takes 20–60 s, longer when the GPU is shared. Video is much slower (on a DGX Spark sharing memory with a 27B LLM, a 5 s MiniMax H3 clip takes about 3.3 minutes as a draft and 8 minutes at the final 20 steps with the default acceleration, against 6 and 15 minutes without it) which is why `generate_video` never blocks: it returns a `job_id` and `wait_for_job` does the waiting in chunks of whatever your host allows. For images, every MCP host applies its own timeout to a tool call, and if that is shorter than the render the host reports an unknown outcome even though the job completes and the file is saved. Two ways to avoid it:
 
 - **Raise the host's timeout** so calls finish inline. OMP: add `"timeout": 180000` (milliseconds) to the server entry in `mcp.json`. Claude Code and Codex have their own settings for MCP tool timeouts; see their documentation.
 - **Or lower comfy-mcp's wait** below the host's timeout, per host, with `COMFY_MCP_MAX_WAIT` in the server entry's `env`. The call then returns a `job_id` in time and the model finishes with `wait_for_job`.
@@ -145,7 +146,7 @@ Either way nothing is lost: a job that was already delivered to a caller that ga
 |---|---|
 | `generate_image(prompt, model?, negative?, width?, height?, aspect?, seed?, steps?, cfg?, count?, save?)` | Text to image. `model` defaults to the configured default (`qwen21`). `aspect` presets: `square`, `landscape`, `portrait`, `wide`, `tall`. |
 | `edit_image(instruction, images[], model?, negative?, width?, height?, seed?, steps?, cfg?, count?, save?)` | Edit one image or compose from 2–4. `images` are local paths or base64. First image = base and canvas. |
-| `generate_video(prompt, model?, mode?, images[]?, audio?, seconds?, orientation?, draft?, seed?, save?, wait?)` | 5–15 s clip with sound. `mode`: `t2v`, `i2v` (first frame, optional last), `r2v` (1–3 references), `refav` (references + audio). Async: returns a `job_id`; finish with `wait_for_job(job_id, timeout=600)`. `draft=true` is an 8-step turbo preview. |
+| `generate_video(prompt, model?, mode?, images[]?, audio?, seconds?, orientation?, draft?, seed?, steps?, save?, wait?)` | 5–15 s clip with sound. `mode`: `t2v`, `i2v` (first frame, optional last), `r2v` (1–3 references), `refav` (references + audio). Async: returns a `job_id`; finish with `wait_for_job(job_id, timeout=600)`. `draft=true` is an 8-step turbo preview rendered at a smaller canvas and upscaled to full size. `steps` overrides the step count. |
 | `server_status()` | Version, GPU memory, queue counts, whether a foreign job is running, our active jobs. |
 | `list_models()` | The `model` keys this server can drive, each with its configured files and readiness (what's missing), plus everything ComfyUI has installed. |
 | `job_status(job_id)`, `wait_for_job(job_id, timeout?)`, `fetch_result(job_id)`, `cancel_job(job_id)` | Used when a call outlasts `max_wait` and returns a job id instead of images. |
@@ -164,6 +165,7 @@ What this server does:
 - After a video job (configurable with `free_models_after`) the server asks ComfyUI to unload its models, so the multi-GB video encoder and model do not stay resident on a box shared with other services. Image models stay warm for fast iteration.
 - Video is written by VideoHelperSuite to ComfyUI's `temp/` folder (never `output/`), fetched once, then every file it left (the MP4, the video-only intermediate and the first-frame PNG) is overwritten with a 1×1 blank. The first-frame preview comes over the websocket like an image. Video metadata embedding is off, so the prompt is not stored in the file.
 - Reference images are uploaded with `type=temp` under random names and referenced as `name [temp]`. Nothing goes to `input/`. As soon as the job finishes, each temp file is overwritten with a 1×1 blank PNG (ComfyUI has no delete endpoint); the empty files vanish when ComfyUI restarts.
+- With `save_policy = "never"`, full-size results are never written to disk on the machine running comfy-mcp: they are held in memory and handed out once as authenticated download handles (see *Delivering full-size files to a remote user*), then dropped.
 - `POST /history {"delete": [prompt_id]}` runs as soon as the prompt finishes, success or failure.
 - No log file, no cache, no persisted job list. `--debug` prints terse diagnostics to stderr only.
 
