@@ -15,7 +15,8 @@ comfy-mcp is a thin MCP server in front of a ComfyUI instance you already run. I
 | `recipes/minimax_h3.py` | MiniMax H3 graphs (t2v, i2v, r2v, refav; draft via turbo LoRA), frame grid, prompt guidance. |
 | `images.py` | Input decoding (path, `data:` URL, base64), JPEG previews, output naming and saving. |
 | `jobs.py` | In-memory job registry for calls that outlast `max_wait`. |
-| `http.py` | Streamable HTTP transport behind a static bearer token. |
+| `downloads.py` | In-memory store for full-size results handed out as download handles; nothing on disk. |
+| `http.py` | Streamable HTTP transport and the `/dl/` download route, both behind a static bearer token. |
 
 ## One call, end to end
 
@@ -25,7 +26,7 @@ comfy-mcp is a thin MCP server in front of a ComfyUI instance you already run. I
 4. `POST /prompt` submits the graph. The output node is `SaveImageWebsocket`, which emits each finished image as a binary frame (8-byte header: event type, image format, then PNG bytes) instead of writing a file.
 5. The websocket loop relays `status`/`progress` events as MCP progress notifications, reports the queue position while waiting behind other jobs, and collects PNG frames while the save node is executing. Sampler previews arrive on the same channel as JPEG and are ignored.
 6. When the prompt finishes, `POST /history {"delete": [prompt_id]}` removes it from ComfyUI's in-memory history, and each temp reference is overwritten with a 1×1 blank PNG (ComfyUI has no delete endpoint; the empty files disappear on its next restart).
-7. Full-size PNGs are written to `output_dir` on the client machine (or returned as base64 when `save=false`). The tool result is one text block (paths, seed, size, timing) followed by one JPEG preview per image.
+7. Full-size PNGs are written to `output_dir` on the machine running comfy-mcp, or, under `save_policy = "never"` (and for `save=false` in HTTP mode), moved into an in-memory download store and returned as `download: comfy://result/<handle>` lines that the client fetches with its bearer token from `GET /dl/<handle>` (`downloads.py`, served by `http.py`). The tool result is one text block (paths or handles, seed, size, timing) followed by one JPEG preview per image.
 
 If the call outlasts `max_wait`, the job keeps running in the background and the tool returns JSON with a `job_id`. `wait_for_job`, `job_status`, `fetch_result` and `cancel_job` operate on that registry. Results live in memory until fetched or until `job_ttl` expires.
 

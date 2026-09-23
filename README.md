@@ -42,6 +42,7 @@ default_steps = 25
 default_cfg   = 1.0
 max_pixels    = 2097152  # 2 MP canvas cap
 job_ttl       = 1800     # seconds unfetched results stay in memory
+save_policy   = "default"  # "default" | "never" | "always"; env: COMFY_MCP_SAVE_POLICY
 default_image_model = "qwen21"   # used when a call omits `model`
 free_models_after = ["video"]    # unload ComfyUI's models after these job kinds; images stay warm
 
@@ -86,6 +87,21 @@ COMFY_MCP_HTTP_TOKEN=$(openssl rand -hex 24) comfy-mcp --http   # or set [http] 
 ```
 
 then point the client at `http://<host>:8765/mcp` with `Authorization: Bearer <token>`. Bind `[http] host = "0.0.0.0"` to serve the LAN.
+
+**Delivering full-size files to a remote user.** When comfy-mcp runs on a server for a browser chat UI, `output_dir` is on the wrong machine. Set `save_policy = "never"` on that instance: nothing is ever written to disk, whatever `save` the model passes, and each full-size file is returned as a line of its own:
+
+```
+download: comfy://result/<handle>.png
+```
+
+The client's backend fetches it with the same bearer token as `/mcp`:
+
+```
+GET http://<host>:8765/dl/<handle>.png
+Authorization: Bearer <token>
+```
+
+The response streams from memory with the right `Content-Type`, `Content-Disposition: attachment; filename="<timestamp>-<seed>.<ext>"` and `Cache-Control: no-store`. A handle stays fetchable until 60 s after its first complete download (a retry window) or until `job_ttl`, whichever comes first; `HEAD` and aborted transfers do not use it up. Fetching the same job again (`fetch_result` after `wait_for_job`) returns the same handle, or a note that the file was already downloaded, plus the preview. The client should strip `download:` lines before passing tool results to the model. In HTTP mode `save=false` under the default policy also returns handles instead of base64.
 
 ## Models
 

@@ -24,6 +24,11 @@ max_pixels = 2097152
 # Seconds finished-but-unfetched results stay in memory.
 job_ttl = 1800
 
+# Where full-size results go. "default": honour each call's save flag (save=true writes to output_dir).
+# "never": never write to disk; results are handed out as one-shot download handles (HTTP mode, GET /dl/).
+# "always": always write to output_dir. Env override: COMFY_MCP_SAVE_POLICY
+save_policy = "default"
+
 # Image model used when a call does not pass `model`. Currently only "qwen21" is implemented.
 default_image_model = "qwen21"
 

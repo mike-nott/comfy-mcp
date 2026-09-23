@@ -19,7 +19,8 @@ from mcp.server.mcpserver.utilities.types import Image
 from . import __version__
 from .comfy import ComfyClient, ComfyError
 from .config import Settings
-from .images import dimensions, load_audio_input, load_input, preview_jpeg, save_bytes, save_png
+from .downloads import URI_PREFIX, DownloadStore
+from .images import dimensions, load_audio_input, load_input, output_name, preview_jpeg, save_bytes, save_png
 from .jobs import Job, JobRegistry
 from .recipes import IMAGE_MODELS, VIDEO_MODELS, image_model, video_model
 
@@ -77,6 +78,7 @@ def _seed(seed: int | None) -> int:
 def build_server(settings: Settings) -> MCPServer:
     client = ComfyClient(settings.comfyui_url, debug=settings.debug)
     registry = JobRegistry(settings.job_ttl)
+    downloads = DownloadStore(settings.job_ttl)
     mcp = MCPServer(
         "comfy",
         title="ComfyUI",
@@ -251,39 +253,71 @@ def build_server(settings: Settings) -> MCPServer:
                 await report(ctx, job)
         return True
 
+    def delivery(save: bool) -> str:
+        """How full-size results leave: "file" (output_dir), "handle" (download handle) or "base64"."""
+        if settings.save_policy == "always":
+            return "file"
+        if settings.save_policy == "never":
+            return "handle"
+        if save:
+            return "file"
+        return "handle" if settings.http_mode else "base64"
+
+    def handle_lines(job: Job) -> list[str]:
+        lines = []
+        for handle in job.handles or []:
+            state = downloads.status(handle)
+            if state == "ready":
+                lines.append(f"download: {URI_PREFIX}{handle}")
+            else:
+                lines.append(f"note: file {handle.rsplit('.', 1)[-1]} already {'downloaded' if state == 'delivered' else 'expired'}")
+        return lines
+
     def finished_content(job: Job, save: bool) -> list[Any]:
         """Build the result for a finished job. Safe to call more than once: a job that was already
-        delivered (for example by a call whose client timed out) returns the same saved paths."""
+        delivered (for example by a call whose client timed out) returns the same paths or handles."""
         if job.state == "error":
             raise ComfyError(job.error or "generation failed")
         if job.state == "cancelled":
             raise ComfyError("the job was cancelled")
         if job.media == "video":
             return finished_video(job, save)
-        if not job.results:
-            raise ComfyError("the job finished without images" if job.finished else f"the job is still {job.state}")
+        if job.previews is None:
+            if not job.results:
+                raise ComfyError("the job finished without images" if job.finished else f"the job is still {job.state}")
+            job.previews = [preview_jpeg(png, settings.preview_px) for png in job.results]
+            job.dims = dimensions(job.results[0])
         params = job.params
-        width, height = dimensions(job.results[0])
+        count = len(job.previews)
+        width, height = job.dims
         run_time = (job.finished or time.monotonic()) - (job.started or job.created)
         head = (
-            f"{params['model']} · {len(job.results)} image{'s' if len(job.results) > 1 else ''} · {width}×{height} · seed {params['seed']}"
+            f"{params['model']} · {count} image{'s' if count > 1 else ''} · {width}×{height} · seed {params['seed']}"
             f" · {params['steps']} steps · cfg {params['cfg']} · {run_time:.1f} s"
         )
         lines = [head]
-        content: list[Any] = []
-        if save and job.saved is None:
-            job.saved = [str(save_png(png, settings.output_dir, params["seed"], index, len(job.results))) for index, png in enumerate(job.results)]
-        for index, png in enumerate(job.results):
-            if save:
-                lines.append(f"saved: {job.saved[index]}")
-            else:
-                lines.append(f"image {index + 1} png_base64: {base64.b64encode(png).decode()}")
-            content.append(Image(data=preview_jpeg(png, settings.preview_px), format="jpeg"))
-        content.insert(0, "\n".join(lines))
+        mode = delivery(save)
+        if job.handles is not None and mode != "handle":
+            mode = "handle"  # bytes were already handed off as downloads
+        if mode == "handle":
+            if job.handles is None:
+                job.handles = [
+                    downloads.issue(png, output_name(params["seed"], i, count), "image/png") for i, png in enumerate(job.results)
+                ]
+                job.results = None  # full-size bytes now live only in the download store
+            lines += handle_lines(job)
+        elif mode == "file":
+            if job.saved is None:
+                job.saved = [str(save_png(png, settings.output_dir, params["seed"], i, count)) for i, png in enumerate(job.results)]
+            lines += [f"saved: {path}" for path in job.saved]
+        else:
+            lines += [f"image {i + 1} png_base64: {base64.b64encode(png).decode()}" for i, png in enumerate(job.results or [])]
+        content: list[Any] = ["\n".join(lines)]
+        content += [Image(data=jpeg, format="jpeg") for jpeg in job.previews]
         return content
 
     def finished_video(job: Job, save: bool) -> list[Any]:
-        if not job.files and not job.saved:
+        if not job.files and not job.saved and not job.handles:
             raise ComfyError("the job finished without a video" if job.finished else f"the job is still {job.state}")
         params = job.params
         run_time = (job.finished or time.monotonic()) - (job.started or job.created)
@@ -295,15 +329,27 @@ def build_server(settings: Settings) -> MCPServer:
             head += " · accel: " + ", ".join(params["accel"])
         lines = [head]
         lines += [f"note: {note}" for note in params.get("notes", [])]
-        if save:
+        mode = delivery(save)
+        if job.handles is not None:
+            mode = "handle"
+        elif job.saved is not None and mode != "file":
+            mode = "file"  # bytes already on disk
+        if mode == "handle":
+            if job.handles is None:
+                count = len(job.files)
+                job.handles = [
+                    downloads.issue(data, output_name(params["seed"], i, count, ext=_ext(name)), "video/mp4" if _ext(name) == ".mp4" else "application/octet-stream")
+                    for i, (name, data) in enumerate(job.files)
+                ]
+                job.files = None
+            lines += handle_lines(job)
+        elif mode == "file":
             if job.saved is None:
                 job.saved = [str(save_bytes(data, settings.output_dir, params["seed"], i, len(job.files), _ext(name))) for i, (name, data) in enumerate(job.files)]
                 job.files = None  # bytes are on disk now; keep the paths and the poster
             lines += [f"saved: {path}" for path in job.saved]
-        elif job.files:
-            lines += [f"video {i + 1} {_ext(name).lstrip('.')}_base64: {base64.b64encode(data).decode()}" for i, (name, data) in enumerate(job.files)]
         else:
-            lines += [f"saved earlier: {path}" for path in job.saved]
+            lines += [f"video {i + 1} {_ext(name).lstrip('.')}_base64: {base64.b64encode(data).decode()}" for i, (name, data) in enumerate(job.files or [])]
         content: list[Any] = ["\n".join(lines)]
         if job.poster:
             content.append(Image(data=preview_jpeg(job.poster, settings.preview_px), format="jpeg"))
@@ -610,4 +656,5 @@ def build_server(settings: Settings) -> MCPServer:
     async def models_resource() -> str:
         return json.dumps(await list_models(), indent=2)
 
+    mcp.comfy_downloads = downloads  # served by http.py at GET /dl/<handle>
     return mcp

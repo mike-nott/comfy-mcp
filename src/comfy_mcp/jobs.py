@@ -28,6 +28,9 @@ class Job:
     files: list[tuple[str, bytes]] | None = None  # (server filename, bytes) for video/audio outputs
     poster: bytes | None = None  # first-frame PNG for video
     saved: list[str] | None = None  # paths written by an earlier delivery of this job
+    handles: list[str] | None = None  # download handles issued for this job (save_policy "never" / HTTP)
+    previews: list[bytes] | None = None  # JPEG previews, kept after full-size bytes are handed off
+    dims: tuple[int, int] | None = None
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
     cancel_hook: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
@@ -130,7 +133,7 @@ class JobRegistry:
         now = time.monotonic()
         for job_id, job in list(self._jobs.items()):
             if job.finished is not None and now - job.finished > self.ttl:
-                job.results = job.files = job.poster = None
+                job.results = job.files = job.poster = job.previews = None
                 self._jobs.pop(job_id, None)
 
     def active(self) -> list[Job]:

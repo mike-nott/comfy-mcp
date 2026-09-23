@@ -39,6 +39,11 @@ max_pixels = 2097152
 # Seconds finished-but-unfetched results stay in memory.
 job_ttl = 1800
 
+# Where full-size results go. "default": honour each call's save flag (save=true writes to output_dir).
+# "never": never write to disk; results are handed out as one-shot download handles (HTTP mode, GET /dl/).
+# "always": always write to output_dir. Env override: COMFY_MCP_SAVE_POLICY
+save_policy = "default"
+
 # Image model used when a call does not pass `model`. Currently only "qwen21" is implemented.
 default_image_model = "qwen21"
 
@@ -184,6 +189,8 @@ class Settings:
     default_cfg: float = 1.0
     max_pixels: int = 2_097_152
     job_ttl: float = 1800.0
+    save_policy: str = "default"
+    http_mode: bool = False
     default_image_model: str = "qwen21"
     default_video_model: str = "minimax_h3"
     max_video_seconds: float = 15.0
@@ -249,6 +256,7 @@ def load(explicit: str | Path | None = None, *, debug: bool = False, env: dict[s
         default_cfg=float(data.get("default_cfg", Settings.default_cfg)),
         max_pixels=int(data.get("max_pixels", Settings.max_pixels)),
         job_ttl=float(data.get("job_ttl", Settings.job_ttl)),
+        save_policy=str(data.get("save_policy", Settings.save_policy)),
         default_image_model=str(data.get("default_image_model", Settings.default_image_model)),
         default_video_model=str(data.get("default_video_model", Settings.default_video_model)),
         max_video_seconds=float(data.get("max_video_seconds", Settings.max_video_seconds)),
@@ -274,6 +282,10 @@ def load(explicit: str | Path | None = None, *, debug: bool = False, env: dict[s
         settings.output_dir = Path(env["COMFY_MCP_OUTPUT_DIR"]).expanduser()
     if env.get("COMFY_MCP_HTTP_TOKEN"):
         settings.http.token = env["COMFY_MCP_HTTP_TOKEN"]
+    if env.get("COMFY_MCP_SAVE_POLICY"):
+        settings.save_policy = env["COMFY_MCP_SAVE_POLICY"]
+    if settings.save_policy not in ("default", "never", "always"):
+        raise ValueError(f"save_policy must be 'default', 'never' or 'always', not {settings.save_policy!r}")
     if env.get("COMFY_MCP_MAX_WAIT"):
         settings.max_wait = float(env["COMFY_MCP_MAX_WAIT"])
     return settings

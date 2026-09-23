@@ -1,6 +1,6 @@
 [project]
 name = "comfy-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP server for private one-shot media generation on your own ComfyUI"
 readme = "README.md"
 license = "MIT"

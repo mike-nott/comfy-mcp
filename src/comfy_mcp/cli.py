@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = load(args.config, debug=args.debug)
-    except FileNotFoundError as error:
+    except (FileNotFoundError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .server import build_server
 
+    settings.http_mode = bool(args.http)
     mcp = build_server(settings)
     if args.http:
         from .http import serve
